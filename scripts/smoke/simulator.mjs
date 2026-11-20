@@ -403,6 +403,16 @@ try {
   assert.equal(incomingA.data.messageId, incomingB.data.messageId);
   assert.equal(incomingA.data.origin, "live");
   assert.equal((await b.message("personal", incomingB.data.messageId)).body, "Incoming through real sync");
+  if (process.env.WX_LEGACY_MIGRATION_CHECK === "1") {
+    const tool = join(repository, "extras/legacy-migration/native_shadow.py");
+    const { stdout } = await execute("python3", [
+      tool, "--server", hub.ready.endpoint, "--token-file", hub.ready.tokenFile,
+      "--account", "personal", "compare", "sim_mei",
+    ], { timeout: 30000 });
+    const native = JSON.parse(stdout);
+    assert.ok(native.native_messages >= 1);
+    assert.ok(native.with_string_server_id >= 1);
+  }
 
   const resumeCursor = streamB.events.at(-1).cursor;
   await unsubscribe(streamB);
@@ -469,6 +479,19 @@ try {
     assert.notEqual((await a.mediaAsset("personal", candidate.id)).state, "available");
   }
 
+  if (process.env.WX_LEGACY_MIGRATION_CHECK === "1") {
+    await control({ op: "receive_media", account: "personal", peer: "sim_mei", kind: "file" });
+    const file = await waitFor("received ordinary file projected", async () =>
+      (await a.messages("personal", "sim_mei")).items.find(item => item.type === 49 && item.appMessageType === 6));
+    const expectedFile = Buffer.from("A file from the local AgentWechat simulator.\n");
+    const destination = join(temporary, "migration-received-attachment.txt");
+    await cli("messages", "media", "sim_mei", file.id, "--output", destination, "--wait", "20");
+    assert.deepEqual(await readFile(destination), expectedFile);
+    const cached = (await a.mediaAssets("personal", file.id)).items.find(item => item.kind === "file" && item.state === "available");
+    assert.equal(cached?.filename, "simulator-note.txt");
+    assert.equal(cached?.sha256, createHash("sha256").update(expectedFile).digest("hex"));
+  }
+
   const photo = zstdDecompressSync(await readFile(join(repository, "packages/native-client-rust/crates/wechat-core/tests/fixtures/send-images/50mp-baseline.jpg.zst")));
   const photoSource = await a.upload("personal", photo, "synthetic-50mp.jpg", "image/jpeg");
   const photoRequest = { threadId: "sim_mei", kind: "image", sourceId: photoSource.id,
@@ -523,6 +546,17 @@ try {
       assert.equal(createHash("sha256").update(content.bytes).digest("hex"), asset.sha256);
       if (variant === "original") assert.deepEqual(content.bytes, new Uint8Array(photo));
       else assert.ok(content.bytes.length <= 65520);
+    }
+    if (process.env.WX_LEGACY_MIGRATION_CHECK === "1") {
+      const tool = join(repository, "extras/legacy-migration/native_shadow.py");
+      const output = join(temporary, "migration-verified-original.jpg");
+      const { stdout } = await execute("python3", [
+        tool, "--server", hub.ready.endpoint, "--token-file", hub.ready.tokenFile,
+        "--account", "personal", "download", id, output, "--variant", "original",
+      ], { timeout: 30000 });
+      assert.equal(JSON.parse(stdout).sha256, photoHash);
+      assert.deepEqual(await readFile(output), photo);
+      await rm(output);
     }
   }
   assert.equal((await cli("messages", "send", "sim_mei", "--image", photoPath, "--image-quality", "original", "--idempotency-key", "large-photo-original", "--detach")).id, photoOriginalDone.id);

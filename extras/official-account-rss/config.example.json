@@ -1,0 +1,13 @@
+{
+  "publishers": {"my-publisher": "Exact Official Account Name"},
+  "article_timezone": "UTC",
+  "port": 16176,
+  "base_url": "http://127.0.0.1:16176",
+  "visible_pages": 1,
+  "articles_per_check": 1,
+  "desktop": {
+    "container": "agent-wechat",
+    "api_url": "http://127.0.0.1:6174",
+    "token_file": "/absolute/path/to/local/api-token"
+  }
+}

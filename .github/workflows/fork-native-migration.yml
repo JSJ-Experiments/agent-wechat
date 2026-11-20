@@ -5,13 +5,16 @@ on:
     branches: [experiment/official-account-rss]
     paths:
       - .github/workflows/fork-native-migration.yml
+      - extras/legacy-migration/**
+      - extras/official-account-rss/**
       - packages/native-client-rust/**
       - scripts/smoke/simulator.mjs
 permissions:
   contents: read
 concurrency:
   group: fork-native-migration-${{ github.ref }}
-  cancel-in-progress: true
+  # Serialize writers to the reusable Cargo disks; don't discard a warming run.
+  cancel-in-progress: false
 jobs:
   native-arm64:
     if: github.repository == 'JSJ-Experiments/agent-wechat'
@@ -33,19 +36,38 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
-      - uses: Swatinem/rust-cache@v2
+      - name: Mount persistent Cargo build outputs
+        uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1
         with:
-          workspaces: packages/native-client-rust -> target
-          key: fork-native-migration-arm64-v1
+          key: native-migration-arm64-rust-1.93.1-test-v1
+          path: packages/native-client-rust/target
+          commit: "on-change"
+      - name: Mount persistent Cargo registry
+        uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1
+        with:
+          key: native-migration-cargo-registry-v1
+          path: ~/.cargo/registry
+          commit: "on-change"
       - name: Install build and media dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ffmpeg
+          if ! command -v cmake >/dev/null || ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y cmake ffmpeg
+          fi
       - name: Build native daemon and synthetic upstream
-        run: cargo build --locked --profile test -p wx-native -p wechat-simulator --bins
+        run: time cargo build --locked --profile test -p wx-native -p wechat-simulator --bins
       - name: Verify CLI and synthetic message/media exchange
+        env:
+          WX_LEGACY_MIGRATION_CHECK: "1"
         run: |
           python3 scripts/smoke.py target/debug/wx
           node ../../scripts/smoke/simulator.mjs
       - name: Verify unknown message and command handling
-        run: cargo test --locked -p wechat-core own_account_updates_unknown_commands_and_unsupported_messages_are_skipped_as_handled
+        run: time cargo test --locked -p wechat-core own_account_updates_unknown_commands_and_unsupported_messages_are_skipped_as_handled
+      - name: Verify collector and migration companion
+        working-directory: .
+        run: |
+          python3 -m venv "$RUNNER_TEMP/collector"
+          "$RUNNER_TEMP/collector/bin/pip" -q install -r extras/official-account-rss/requirements.txt
+          "$RUNNER_TEMP/collector/bin/python" -m unittest discover -s extras/official-account-rss
+          python3 -m unittest discover -s extras/legacy-migration
