@@ -412,6 +412,13 @@ try {
     const native = JSON.parse(stdout);
     assert.ok(native.native_messages >= 1);
     assert.ok(native.with_string_server_id >= 1);
+    const { stdout: events } = await execute("python3", [
+      tool, "--server", hub.ready.endpoint, "--token-file", hub.ready.tokenFile,
+      "--account", "personal", "skipped",
+    ], { timeout: 30000 });
+    const report = JSON.parse(events);
+    assert.ok(report.events_sampled >= 1);
+    assert.match(report.next_cursor, /^[0-9]+$/);
   }
 
   const resumeCursor = streamB.events.at(-1).cursor;

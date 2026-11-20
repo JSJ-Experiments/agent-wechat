@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from email.utils import format_datetime
 import fcntl
 import hashlib
-from html import escape
+from html import escape, unescape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import hmac
 import io
@@ -34,6 +34,8 @@ IMAGE_HOSTS = frozenset(("mmbiz.qpic.cn", "mmbiz.qlogo.cn"))
 SLUG = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 ASSET_NAME = re.compile(r"[0-9a-f]{64}\.(?:jpg|png|webp|gif)")
 ARTICLE_MARKER = "@@LOCAL_IMAGES@@"
+PENDING_IMAGE = re.compile(r'<img data-wx-pending="([^"<>]+)" alt="([^"<>]*)" />')
+LOCAL_IMAGE = re.compile(r'<img src="@@LOCAL_IMAGES@@/([0-9a-f]{64}\.(?:jpg|png|webp|gif))"')
 BAD_XML = re.compile(r"[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
 SAFE = frozenset("p section div span br hr a b strong i em u s blockquote pre code h1 h2 h3 h4 h5 h6 ul ol li table thead tbody tr td th figure figcaption sup sub".split())
 DROP = frozenset("script style noscript template iframe object embed form input video audio svg math button select".split())
@@ -163,9 +165,11 @@ def sanitize(body, cache):
                 return "[Image unavailable]"
             if remote not in resolved:
                 resolved[remote] = cache(remote)
-            name = resolved[remote]
+            name, retryable = resolved[remote]
             if not name:
                 missing += 1
+                if retryable:
+                    return f'<img data-wx-pending="{escape(remote, quote=True)}" alt="{alt}" />'
                 return "[Image unavailable]"
             images.add(name)
             return f'<img src="{ARTICLE_MARKER}/{name}" alt="{alt}" />'
@@ -221,6 +225,12 @@ class Store:
                     url TEXT PRIMARY KEY, publisher TEXT NOT NULL, title TEXT NOT NULL,
                     published INTEGER, found INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS image_backoff (
+                    original TEXT PRIMARY KEY, retry_after INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS image_repair (
+                    article TEXT PRIMARY KEY, checked INTEGER NOT NULL
+                );
             """)
 
     def open(self):
@@ -228,11 +238,13 @@ class Store:
         db.row_factory = sqlite3.Row
         return db
 
+    def cached_image(self, db, original):
+        old = db.execute("SELECT name FROM assets WHERE original=?", (original,)).fetchone()
+        if old and ASSET_NAME.fullmatch(old["name"]) and (self.images / old["name"]).is_file():
+            return old["name"]
+        return None
+
     def cache_image(self, original):
-        with closing(self.open()) as db:
-            old = db.execute("SELECT name FROM assets WHERE original=?", (original,)).fetchone()
-            if old and (self.images / old["name"]).is_file():
-                return old["name"]
         time.sleep(max(0, self.last_image + 0.85 - time.monotonic()))
         self.last_image = time.monotonic()
         try:
@@ -260,6 +272,60 @@ class Store:
             db.execute("INSERT OR REPLACE INTO assets VALUES (?,?,?)", (original, name, mime))
         return name
 
+    def repair_images(self, limit, *, article=None, now=None):
+        """Resolve only allowlisted image placeholders; never reopen an article."""
+        now = int(time.time()) if now is None else now
+        if limit <= 0:
+            return 0
+        deadline = time.monotonic() + 26
+        with closing(self.open()) as db:
+            if article:
+                rows = db.execute("SELECT url,html FROM articles WHERE url=?", (article,)).fetchall()
+            else:
+                rows = db.execute("""SELECT a.url,a.html FROM image_repair r
+                    JOIN articles a ON a.url=r.article ORDER BY r.checked,a.url LIMIT 20""").fetchall()
+        requested = repaired = 0
+        for row in rows:
+            if requested >= limit or time.monotonic() >= deadline:
+                break
+            resolved = {}
+
+            def complete(match):
+                nonlocal requested
+                original = image_url(unescape(match[1]))
+                if original is None:
+                    return "[Image unavailable]"
+                if original not in resolved:
+                    with closing(self.open()) as db:
+                        name = self.cached_image(db, original)
+                        blocked = db.execute("SELECT 1 FROM image_backoff WHERE original=? AND retry_after>?",
+                                             (original, now)).fetchone()
+                    if not name and not blocked and requested < limit and time.monotonic() < deadline:
+                        requested += 1
+                        name = self.cache_image(original)
+                        with closing(self.open()) as db, db:
+                            if name:
+                                db.execute("DELETE FROM image_backoff WHERE original=?", (original,))
+                            else:
+                                db.execute("INSERT OR REPLACE INTO image_backoff VALUES (?,?)",
+                                           (original, now + 12 * 3600))
+                    resolved[original] = name
+                if name := resolved[original]:
+                    return f'<img src="{ARTICLE_MARKER}/{name}" alt="{match[2]}" />'
+                return match[0]
+            content = PENDING_IMAGE.sub(complete, row["html"])
+            replaced = len(PENDING_IMAGE.findall(row["html"])) - len(PENDING_IMAGE.findall(content))
+            repaired += replaced
+            with closing(self.open()) as db, db:
+                if replaced:
+                    db.execute("""UPDATE articles SET html=?, image_count=?, missing_images=missing_images-?
+                                  WHERE url=?""", (content, len(set(LOCAL_IMAGE.findall(content))), replaced, row["url"]))
+                if PENDING_IMAGE.search(content):
+                    db.execute("INSERT OR REPLACE INTO image_repair VALUES (?,?)", (row["url"], now))
+                else:
+                    db.execute("DELETE FROM image_repair WHERE article=?", (row["url"],))
+        return repaired
+
     def ingest(self, url, raw, expected=None, timezone=UTC, now=None):
         url = article_url(url)
         title, publisher, body, published, description = parse_article(raw, timezone)
@@ -276,9 +342,10 @@ class Store:
         def cache(candidate):
             nonlocal count
             count += 1
-            return self.cache_image(candidate) if count <= 40 else None
+            return self.cached_image(db, candidate), count <= 160
 
-        content, image_count, missing = sanitize(body, cache)
+        with closing(self.open()) as db:
+            content, image_count, missing = sanitize(body, cache)
         if not content.strip():
             raise Refused("No publishable article body remained after cleaning.")
         canonical = old["url"] if old else url
@@ -290,6 +357,13 @@ class Store:
                 missing_images=excluded.missing_images""",
                        (canonical, identity, publisher, title, description, content, published, now, image_count, missing))
             db.execute("DELETE FROM attempts WHERE url=?", (url,))
+            if PENDING_IMAGE.search(content):
+                db.execute("INSERT OR IGNORE INTO image_repair VALUES (?,0)", (canonical,))
+            else:
+                db.execute("DELETE FROM image_repair WHERE article=?", (canonical,))
+        # Commit the article first so an interrupted image download can't lose it.
+        self.repair_images(16, article=canonical)
+        with closing(self.open()) as db:
             return db.execute("SELECT * FROM articles WHERE url=?", (canonical,)).fetchone(), old is None
 
     def request_article(self, url, expected=None, timezone=UTC, retry=False):
@@ -444,7 +518,8 @@ def render_rss(store, publisher, site, selector):
         sub(it, "category", row["publisher"])
         sub(it, "pubDate", format_datetime(datetime.fromtimestamp(row["published"] or row["found"], UTC), usegmt=True))
         sub(it, "description", escape(row["description"]))
-        sub(it, tag, row["html"].replace(ARTICLE_MARKER + "/", site + "/image/"))
+        content = PENDING_IMAGE.sub("[Image unavailable]", row["html"])
+        sub(it, tag, LOCAL_IMAGE.sub(lambda m: f'<img src="{site}/image/{m[1]}"', content))
     return tostring(rss, encoding="utf-8", xml_declaration=True)
 
 
@@ -552,7 +627,11 @@ def main():
     r.add_argument("--activate", action="store_true", help="Open Official Accounts first when the desktop main window is active.")
     r.add_argument("--skip-busy", action="store_true", help="For a timer: skip when the shared desktop is in use.")
     sub.add_parser("status", help="Show archived article counts without contacting WeChat.")
-    sub.add_parser("notify", help="Deliver pending archive entries to the optional configured Discord webhook.")
+    notify = sub.add_parser("notify", help="Deliver pending archive entries to the configured Discord webhook.")
+    notify.add_argument("--if-configured", action="store_true", help="Skip successfully without a configured webhook.")
+    repair = sub.add_parser("repair-images", help="Retry queued public CDN images without opening article pages.")
+    repair.add_argument("--limit", type=int, default=12, choices=range(1, 17), metavar="1–16",
+                        help="Maximum image requests per run (default: 12).")
     discover = sub.add_parser("discover", help="Find newly delivered cards without using the desktop UI.")
     discover.add_argument("--source", choices=("legacy", "native"), default="legacy")
     discover.add_argument("--fetch", type=int, default=0, choices=(0, 1, 2),
@@ -572,7 +651,8 @@ def main():
                 for row in db.execute("SELECT publisher,count(*) AS articles,sum(image_count) AS images,sum(missing_images) AS missing FROM articles GROUP BY publisher"):
                     print(json.dumps(dict(row), ensure_ascii=False))
                 print(json.dumps({"discovered_article_links": db.execute("SELECT count(*) FROM discovered_cards").fetchone()[0],
-                                  "held_verification": db.execute("SELECT count(*) FROM attempts WHERE state='verification-or-layout'").fetchone()[0]}))
+                                  "held_verification": db.execute("SELECT count(*) FROM attempts WHERE state='verification-or-layout'").fetchone()[0],
+                                  "articles_with_queued_images": db.execute("SELECT count(*) FROM image_repair").fetchone()[0]}))
         else:
             with run_lock(store):
                 if args.command == "add":
@@ -591,9 +671,11 @@ def main():
                     show(store.ingest(args.url, captured, args.publisher, zone))
                 elif args.command == "notify":
                     notification_file = config.get("discord_webhook_file")
-                    if not notification_file:
+                    if not notification_file and not args.if_configured:
                         raise Refused("No Discord webhook has been configured.")
-                    print(json.dumps({"delivered": store.notify(notification_file)}))
+                    print(json.dumps({"delivered": store.notify(notification_file) if notification_file else 0}))
+                elif args.command == "repair-images":
+                    print(json.dumps({"resolved_image_references": store.repair_images(args.limit)}))
                 elif args.command == "discover":
                     from discovery import legacy_cards, native_cards
                     cards = (native_cards if args.source == "native" else legacy_cards)(config)
@@ -616,8 +698,11 @@ def main():
                         url, clipboard = desktop.capture()
                         show(store.ingest(url, clipboard, args.publisher, zone))
                     else:
-                        desktop.check(store, zone, args.activate)
-                        if config.get("discord_webhook_file"):
+                        if args.activate and args.skip_busy:
+                            raise Refused("--activate is for manual runs; use --skip-busy alone in a timer.")
+                        idle = max(60, min(int(config.get("minimum_desktop_idle_seconds", 120)), 3600)) if args.skip_busy else 0
+                        desktop.check(store, zone, args.activate, minimum_idle=idle)
+                        if not args.skip_busy and config.get("discord_webhook_file"):
                             print(json.dumps({"delivered": store.notify(config["discord_webhook_file"])}))
     except DesktopBusy as error:
         if args.command == "check" and args.skip_busy:

@@ -18,6 +18,33 @@ from urllib.request import ProxyHandler, Request, build_opener
 from PIL import Image
 from collector import DesktopBusy, Refused, StrictRedirect, article_url, parse_article, tidy
 
+# Read the container X server's input-idle counter. Never reset it or send
+# input on a scheduled run if the counter cannot be read.
+READ_X11_IDLE = """
+from ctypes import CDLL, POINTER, Structure, byref, c_char_p, c_int, c_ulong, c_void_p
+
+class Info(Structure):
+    _fields_ = [("window", c_ulong), ("state", c_int), ("kind", c_int),
+                ("til_or_since", c_ulong), ("idle", c_ulong), ("event_mask", c_ulong)]
+
+x11 = CDLL("libX11.so.6")
+xss = CDLL("libXss.so.1")
+x11.XOpenDisplay.argtypes, x11.XOpenDisplay.restype = [c_char_p], c_void_p
+x11.XDefaultRootWindow.argtypes, x11.XDefaultRootWindow.restype = [c_void_p], c_ulong
+x11.XCloseDisplay.argtypes = [c_void_p]
+xss.XScreenSaverQueryInfo.argtypes = [c_void_p, c_ulong, POINTER(Info)]
+display = x11.XOpenDisplay(None)
+if not display:
+    raise SystemExit(1)
+try:
+    info = Info()
+    if not xss.XScreenSaverQueryInfo(display, x11.XDefaultRootWindow(display), byref(info)):
+        raise SystemExit(1)
+    print(info.idle)
+finally:
+    x11.XCloseDisplay(display)
+"""
+
 
 def checked(args, *, data=None, timeout=12, allowed=(0,)):
     try:
@@ -122,6 +149,14 @@ class Desktop:
         if not re.fullmatch(r"[0-9]+", win):
             raise Refused("No verified active desktop window.")
         return win
+
+    def require_idle(self, minimum_seconds):
+        try:
+            elapsed_ms = int(self.docker("python3", "-c", READ_X11_IDLE, timeout=4))
+        except (Refused, ValueError) as error:
+            raise DesktopBusy("Cannot verify desktop idle time; skipping all GUI actions.") from error
+        if elapsed_ms < minimum_seconds * 1000:
+            raise DesktopBusy("Recent input on the shared desktop; skipping all GUI actions.")
 
     def geometry(self, win):
         value = self.docker("xdotool", "getwindowgeometry", "--shell", win).decode()
@@ -236,7 +271,9 @@ timeout 3 xclip -selection clipboard -out -t text/html
             except Refused:
                 pass
 
-    def check(self, store, zone, activate):
+    def check(self, store, zone, activate, minimum_idle=0):
+        if minimum_idle:
+            self.require_idle(minimum_idle)
         if self.get("/api/status/auth").get("status") != "logged_in":
             raise DesktopBusy("Legacy WeChat is not logged in; no scraping was attempted.")
         names = tuple(self.config.get("publishers", {}).values())
@@ -269,6 +306,8 @@ timeout 3 xclip -selection clipboard -out -t text/html
                 region = (70, y + 15, 430, max_y)
                 if fresh.crop(region).tobytes() != feed.crop(region).tobytes() or self.pane(main) != rect:
                     raise DesktopBusy("The official-account inbox changed during discovery; will retry later.")
+                if minimum_idle and attempts == 0 and page == 0:
+                    self.require_idle(minimum_idle)
                 self.click(main, rect[0] + 145, rect[1] + y + 54)
                 time.sleep(2.2)
                 win = self.active()
@@ -285,8 +324,7 @@ timeout 3 xclip -selection clipboard -out -t text/html
                 from collector import show
                 article, added = store.ingest(url, markup, publisher, zone)
                 show((article, added))
-                if article["missing_images"] == 0:
-                    store.mark_card(key)
+                store.mark_card(key)  # Image repair has its own durable work queue.
                 saved += int(added)
                 if attempts >= limit:
                     break
@@ -294,6 +332,8 @@ timeout 3 xclip -selection clipboard -out -t text/html
             if attempts >= limit or page + 1 >= pages:
                 break
             self.pane(main)
+            if minimum_idle and attempts == 0 and page == 0:
+                self.require_idle(minimum_idle)
             self.docker("sh", "-c", 'test "$(xdotool getactivewindow)" = "$1" && xdotool mousemove "$2" "$3" click --repeat 4 5',
                         "collector", main, rect[0] + 320, rect[1] + 470)
             time.sleep(.9)

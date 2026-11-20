@@ -4,12 +4,13 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.error import URLError
 from xml.etree.ElementTree import fromstring
 
 from PIL import Image
 
-from collector import Refused, Store, article_url, image_url, native_links, render_rss
-from desktop import card_bands, publisher_match
+from collector import DesktopBusy, Refused, Store, article_url, image_url, native_links, render_rss
+from desktop import Desktop, card_bands, publisher_match
 from read_legacy_cards import articles
 
 URL = "https://mp.weixin.qq.com/s/fixtureTest"
@@ -57,6 +58,41 @@ class CollectorTests(unittest.TestCase):
             self.store.ingest(URL, HTML, "Not the publisher")
         fetch.assert_not_called()
 
+    def test_archive_then_retry_images_without_fetching_article(self):
+        with patch("collector.fetch", side_effect=URLError("offline")) as fetch:
+            row, new = self.store.ingest(URL, HTML, "Test & News")
+            fetch.assert_called_once()
+        self.assertTrue(new)
+        self.assertEqual((row["image_count"], row["missing_images"]), (0, 3))
+        before = render_rss(self.store, None, "http://localhost:16176/key", "all")
+        self.assertNotIn(b"mmbiz", before)
+        self.assertNotIn(b"data-wx-pending", before)
+        self.assertIn(b"test words", before)
+
+        # Restart the collector. A temporary failure is remembered, and no
+        # request to the article page (or chance of another challenge) is needed.
+        store = Store(self.tmp)
+        with patch("collector.fetch", return_value=self.image.getvalue()) as fetch:
+            self.assertEqual(store.repair_images(1, now=row["found"] + 3600), 0)
+            fetch.assert_not_called()
+            self.assertEqual(store.repair_images(1, now=row["found"] + 13 * 3600), 2)
+            fetch.assert_called_once()
+            self.assertEqual(fetch.call_args.args[0], ASSET)
+            self.assertEqual(store.repair_images(1, now=row["found"] + 24 * 3600), 0)
+        fixed, = store.latest()
+        self.assertEqual((fixed["image_count"], fixed["missing_images"]), (1, 1))
+        self.assertEqual(fixed["found"], row["found"])
+        after = render_rss(store, None, "http://localhost:16176/key", "all")
+        self.assertEqual(after.count(b"/key/image/"), 2)
+
+    def test_archive_commits_before_a_download_can_be_interrupted(self):
+        with patch("collector.fetch", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            self.store.ingest(URL, HTML, "Test & News")
+        (row,) = self.store.latest()
+        self.assertEqual(row["missing_images"], 3)
+        with patch("collector.fetch", return_value=self.image.getvalue()):
+            self.assertEqual(self.store.repair_images(1), 2)
+
     def test_holds_verification_instead_of_retrying(self):
         with patch("collector.fetch", side_effect=Refused("Verification")) as fetch:
             for _ in range(2):
@@ -88,6 +124,18 @@ class CollectorTests(unittest.TestCase):
         pane = Image.new("RGB", (704, 600), (237, 237, 237))
         pane.paste("#ffffff", (60, 65, 646, 180))
         self.assertEqual(list(card_bands(pane)), [(65, 180)])
+
+    def test_scheduled_desktop_guard_fails_closed(self):
+        desktop = Desktop({})
+        for result in (b"not available", b"119999", Refused("X server unavailable")):
+            if isinstance(result, Exception):
+                guard = patch.object(desktop, "docker", side_effect=result)
+            else:
+                guard = patch.object(desktop, "docker", return_value=result)
+            with guard, self.assertRaises(DesktopBusy):
+                desktop.require_idle(120)
+        with patch.object(desktop, "docker", return_value=b"120001"):
+            desktop.require_idle(120)
 
     def test_one_official_delivery_can_include_multiple_article_links(self):
         payload = f"""<msg><appmsg><type>5</type><url>{URL}</url><title>Headline</title>

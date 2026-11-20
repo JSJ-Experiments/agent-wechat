@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import sqlite3
 import tempfile
+from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
@@ -61,6 +62,19 @@ class Client:
         if cursor:
             params["cursor"] = cursor
         return self.get(f"/threads/{quote(thread, safe='')}/messages?{urlencode(params)}")
+
+    def events(self, limit, after=None):
+        params = {"limit": limit}
+        if after is None:
+            params["newest"] = "true"
+        else:
+            params["after"] = after
+        try:
+            return self.get(f"/events?{urlencode(params)}")
+        except HTTPError as error:
+            if error.code == 410:
+                raise MigrationError("Requested event cursor expired; continuity cannot be verified.") from None
+            raise
 
     def media(self, message):
         response = self.get(f"/messages/{quote(message, safe='')}/media")
@@ -150,9 +164,39 @@ def shadow_report(client, thread, legacy, limit):
                 report["matched_text_bodies"] += int(item.get("body") == previous["content"])
             if previous["raw_content"] and classify(item)["kind"] == "unknown":
                 report["legacy_unknown_raw_not_exposed"] += 1
-    report["live_unknown_skip_visibility_proven"] = 0
     report["official_account_discovery_supported"] = 0
     return dict(report)
+
+
+def skipped_report(client, limit, after=None):
+    """Report only counts and numeric labels; don't print unknown payloads."""
+    page = client.events(limit, after)
+    if not isinstance(page, dict) or not isinstance(page.get("items"), list):
+        raise MigrationError("Unexpected native event page shape.")
+    cursor = page.get("nextCursor")
+    if not isinstance(cursor, str) or not re.fullmatch(r"[0-9]{1,20}", cursor):
+        raise MigrationError("Native event page doesn't have a valid resume cursor.")
+    skipped = Counter()
+    numeric_messages = Counter()
+    for event in page["items"]:
+        if not isinstance(event, dict) or event.get("kind") != "account.control_observed":
+            continue
+        data = event.get("data")
+        if not isinstance(data, dict) or data.get("projection") != "skipped":
+            continue
+        control = data.get("control")
+        command = control.get("commandId") if isinstance(control, dict) else None
+        message_type = control.get("messageType") if isinstance(control, dict) else None
+        skipped[str(command) if type(command) is int else "unlabeled"] += 1
+        if type(message_type) is int:
+            numeric_messages[str(message_type)] += 1
+    return {
+        "events_sampled": len(page["items"]),
+        "next_cursor": cursor,
+        "skipped_controls": sum(skipped.values()),
+        "skipped_by_command": dict(skipped),
+        "skipped_by_message_type": dict(numeric_messages),
+    }
 
 
 def main():
@@ -166,6 +210,9 @@ def main():
     shadow.add_argument("thread", help="WeChat thread identifier.")
     shadow.add_argument("--legacy", type=Path, help="Read-only path to the legacy recorder database.")
     shadow.add_argument("--limit", type=int, default=25, help="Sample between 1 and 100 recent messages.")
+    skipped = commands.add_parser("skipped", help="Count native skipped controls without exposing their payloads.")
+    skipped.add_argument("--after", help="Resume after a previously reported cursor; default: newest page.")
+    skipped.add_argument("--limit", type=int, default=100, help="Sample between 1 and 250 events.")
     download = commands.add_parser("download", help="Download and verify an already-cached native asset.")
     download.add_argument("message", help="Opaque native message ID.")
     download.add_argument("output", type=Path, help="New file; existing destinations are never overwritten.")
@@ -176,6 +223,10 @@ def main():
         client = Client(args.server, args.token_file.read_text().strip(), args.account)
         if args.command == "compare":
             result = shadow_report(client, args.thread, args.legacy, max(1, min(100, args.limit)))
+        elif args.command == "skipped":
+            if args.after is not None and not re.fullmatch(r"[0-9]{1,20}", args.after):
+                raise MigrationError("Expected a decimal event cursor.")
+            result = skipped_report(client, max(1, min(250, args.limit)), args.after)
         else:
             assets = [x for x in client.media(args.message)
                       if x.get("state") == "available" and x.get("actualVariant") == args.variant]
