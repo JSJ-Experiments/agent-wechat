@@ -16,6 +16,6 @@ The report compares string server IDs, numeric types and subtypes, text, and vis
 
 The download command reads only already-cached verified bytes. It checks the actual variant, length, and SHA-256 before publishing a new file, and never overwrites an existing file or substitutes a thumbnail. Acquisition of pending media, automatic forwarder continuity, and live profile eligibility must pass separate tests before retiring legacy services.
 
-The fork's ARM64 Blacksmith workflow builds the native daemon and local upstream simulator, exercises CLI and profile projection, verifies cached media against known synthetic bytes, and runs the unsupported-message regression. It does not use live profile material.
+The fork's ARM64 Blacksmith workflow builds the native daemon and local upstream simulator, exercises CLI and profile projection, verifies an original photo and an ordinary incoming file against known synthetic bytes, and runs the unsupported-message regression. It keeps Cargo registry and target directories on separate persistent Blacksmith disks keyed to the native test environment. It does not use live profile material.
 
 A production cutover remains contingent on representative same-history comparisons, real new inbound and unknown events, original-quality images/files/voice/video, exact cursor behaviour through restart, and a rollback plan with an untouched legacy archive. Official-account discovery is a separate current gap: the native API exposes link cards, not an Official Accounts feed or authenticated article viewer.

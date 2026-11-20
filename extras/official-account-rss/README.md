@@ -1,6 +1,6 @@
 # Official-account RSS collector
 
-An independent archive, not an adapter to another RSS service. The collector reads the signed-in WeChat Linux desktop client's Official Accounts view, extracts each opened article as rich HTML, downloads the referenced public image objects, and publishes the full sanitized body with locally served images. No publisher credentials, third-party RSS service, or n8n are used.
+An independent archive, not an adapter to another RSS service. The collector discovers received official-account article cards from an allowlist of publishers, extracts opened articles as rich HTML, downloads their public image objects, and publishes the full sanitized body with locally served images. No publisher credentials, third-party RSS service, or n8n are used.
 
 ## Set up on a host with the existing legacy desktop
 
@@ -13,6 +13,7 @@ cp config.example.json config.json
 chmod 600 config.json
 # Set token_file, container, and the exact names of the publishers you want.
 .venv/bin/python collector.py status
+.venv/bin/python collector.py discover          # Read-only, no desktop or network actions
 .venv/bin/python collector.py check --activate  # deliberate manual use of the shared desktop
 .venv/bin/python collector.py serve
 ```
@@ -35,7 +36,11 @@ This reads only explicit article link cards in the supplied result. It does not 
 
 ### Scheduling and alerts
 
-Use `collector.py check --skip-busy` in a systemd user timer scheduled every six hours. It only scans a verified, foreground Official Accounts pane, and skips if the shared desktop is elsewhere. It will not force the pane open in the background. Only selected publishers and a bounded number of visible cards are scanned; newly published articles outside the loaded pages, alternate inbox layouts, multi-article cards, and discovery from an arbitrary publisher's historical archive are not guaranteed. If the shared desktop is frequently busy, use manual runs rather than automating focus takeover.
+Use `collector.py discover --fetch 1` followed by `collector.py check --skip-busy` in a systemd user timer scheduled every six hours. Discovery reads only selected publishers' delivered cards, including linked stories in an observed multi-article card. It does not query an arbitrary publisher's archive. Legacy discovery reads the existing encrypted profile read-only inside the legacy container; it neither extracts keys from process memory nor copies keys or the profile out of the container. If a public fetch is refused, further automatic web requests pause for 48 hours.
+
+For the native daemon, `discover --source native` can consume persisted link cards in explicitly configured `gh_` publisher threads using its read-only messages API. Set `native.server`, `native.token_file`, `native.account`, and `native.publisher_threads` (publisher ID to thread ID). It cannot enable delivery of posts that the native daemon does not receive, list the phone's follows, or open authenticated article pages. This source needs live migration validation before replacing the tested legacy source.
+
+The desktop HTML fallback scans a verified, foreground Official Accounts pane and skips if the shared desktop is elsewhere. It will not force the pane open in the background. Only selected publishers and a bounded number of visible cards are scanned; getting the full body of an article outside those pages or inside a multi-article card may require manually opening it. A discovered card is not reported as a full RSS item until its body is archived.
 
 For optional direct Discord alerts, add `"discord_webhook_file": "/private/path/to/webhook"` to private config and run `collector.py notify` once to baseline the archive. Future successful checks submit new entries in batches without mass mentions. A failure keeps entries pending; a lost acknowledgment can cause a duplicate. No destination is configured by default.
 

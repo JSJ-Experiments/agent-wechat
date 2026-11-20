@@ -217,6 +217,10 @@ class Store:
                 CREATE TABLE IF NOT EXISTS notification_cursor (
                     destination TEXT PRIMARY KEY, position INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS discovered_cards (
+                    url TEXT PRIMARY KEY, publisher TEXT NOT NULL, title TEXT NOT NULL,
+                    published INTEGER, found INTEGER NOT NULL
+                );
             """)
 
     def open(self):
@@ -316,6 +320,36 @@ class Store:
     def mark_card(self, key):
         with closing(self.open()) as db, db:
             db.execute("INSERT OR REPLACE INTO checked_cards VALUES (?,?)", (key, int(time.time())))
+
+    def discover(self, cards, publishers):
+        inserted = 0
+        with closing(self.open()) as db, db:
+            for card in cards[:1500]:
+                publisher, title, stamp = card.get("publisher"), card.get("title"), card.get("published")
+                if publisher not in publishers or not isinstance(title, str) or not tidy(title):
+                    continue
+                try:
+                    url = article_url(card.get("url"))
+                except (Refused, ValueError):
+                    continue
+                stamp = stamp if type(stamp) is int and 0 < stamp < 5_000_000_000 else None
+                inserted += db.execute("INSERT OR IGNORE INTO discovered_cards VALUES(?,?,?,?,?)",
+                                       (url, publisher, tidy(title)[:600], stamp, int(time.time()))).rowcount
+        return inserted
+
+    def candidates(self, limit):
+        with closing(self.open()) as db:
+            if db.execute("SELECT 1 FROM attempts WHERE state='verification-or-layout' AND updated>? LIMIT 1",
+                          (int(time.time()) - 48 * 3600,)).fetchone():
+                return []
+            return db.execute("""SELECT d.* FROM discovered_cards d WHERE
+                NOT EXISTS(SELECT 1 FROM attempts t WHERE t.url=d.url AND
+                    (t.state='verification-or-layout' OR t.updated>?))
+                AND NOT EXISTS(SELECT 1 FROM articles a WHERE a.url=d.url OR (
+                    a.publisher=d.publisher AND a.title=d.title AND
+                    abs(coalesce(a.published,a.found)-coalesce(d.published,d.found))<172800))
+                ORDER BY coalesce(d.published,d.found) DESC, d.url LIMIT ?""",
+                              (int(time.time()) - 6 * 3600, limit)).fetchall()
 
     def latest(self, publisher=None):
         where, params = ("WHERE publisher=?", (publisher,)) if publisher else ("", ())
@@ -519,6 +553,10 @@ def main():
     r.add_argument("--skip-busy", action="store_true", help="For a timer: skip when the shared desktop is in use.")
     sub.add_parser("status", help="Show archived article counts without contacting WeChat.")
     sub.add_parser("notify", help="Deliver pending archive entries to the optional configured Discord webhook.")
+    discover = sub.add_parser("discover", help="Find newly delivered cards without using the desktop UI.")
+    discover.add_argument("--source", choices=("legacy", "native"), default="legacy")
+    discover.add_argument("--fetch", type=int, default=0, choices=(0, 1, 2),
+                          help="Try this many ordinary article requests, holding blocked URLs.")
     args = parser.parse_args()
     try:
         config, store, access, origin = settings(args.config)
@@ -533,6 +571,8 @@ def main():
             with closing(store.open()) as db:
                 for row in db.execute("SELECT publisher,count(*) AS articles,sum(image_count) AS images,sum(missing_images) AS missing FROM articles GROUP BY publisher"):
                     print(json.dumps(dict(row), ensure_ascii=False))
+                print(json.dumps({"discovered_article_links": db.execute("SELECT count(*) FROM discovered_cards").fetchone()[0],
+                                  "held_verification": db.execute("SELECT count(*) FROM attempts WHERE state='verification-or-layout'").fetchone()[0]}))
         else:
             with run_lock(store):
                 if args.command == "add":
@@ -554,6 +594,21 @@ def main():
                     if not notification_file:
                         raise Refused("No Discord webhook has been configured.")
                     print(json.dumps({"delivered": store.notify(notification_file)}))
+                elif args.command == "discover":
+                    from discovery import legacy_cards, native_cards
+                    cards = (native_cards if args.source == "native" else legacy_cards)(config)
+                    added = store.discover(cards, set(config.get("publishers", {}).values()))
+                    held = 0
+                    for index, row in enumerate(store.candidates(args.fetch)):
+                        if index:
+                            time.sleep(2)
+                        try:
+                            show(store.request_article(row["url"], row["publisher"], zone))
+                        except Refused:
+                            held += 1
+                            # Don't try more public article requests this run after a refusal.
+                            break
+                    print(json.dumps({"discovered": added, "cards_read": len(cards), "held_this_run": held}))
                 else:
                     from desktop import Desktop
                     desktop = Desktop(config)

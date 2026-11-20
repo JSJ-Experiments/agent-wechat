@@ -10,6 +10,7 @@ from PIL import Image
 
 from collector import Refused, Store, article_url, image_url, native_links, render_rss
 from desktop import card_bands, publisher_match
+from read_legacy_cards import articles
 
 URL = "https://mp.weixin.qq.com/s/fixtureTest"
 ASSET = "https://mmbiz.qpic.cn/mmbiz_jpg/fixture/0?wx_fmt=jpeg"
@@ -87,6 +88,24 @@ class CollectorTests(unittest.TestCase):
         pane = Image.new("RGB", (704, 600), (237, 237, 237))
         pane.paste("#ffffff", (60, 65, 646, 180))
         self.assertEqual(list(card_bands(pane)), [(65, 180)])
+
+    def test_one_official_delivery_can_include_multiple_article_links(self):
+        payload = f"""<msg><appmsg><type>5</type><url>{URL}</url><title>Headline</title>
+        <mmreader><category><item><url>https://mp.weixin.qq.com/s/fixtureNext</url>
+        <title>Second article</title></item></category></mmreader></appmsg></msg>"""
+        self.assertEqual(list(articles(payload)), [(URL, "Headline"),
+                                                    ("https://mp.weixin.qq.com/s/fixtureNext", "Second article")])
+
+    def test_discovery_dedupes_and_does_not_publish_unverified_html(self):
+        card = {"publisher": "Test & News", "title": "Link card", "url": URL, "published": 1795176120}
+        self.assertEqual(self.store.discover([card, card], {"Test & News"}), 1)
+        self.assertEqual(len(self.store.candidates(1)), 1)
+        self.assertEqual(self.store.latest(), [])
+        with patch("collector.fetch", side_effect=Refused("Verification")), self.assertRaises(Refused):
+            self.store.request_article(URL)
+        other = card | {"url": "https://mp.weixin.qq.com/s/anotherHeadline"}
+        self.assertEqual(self.store.discover([other], {"Test & News"}), 1)
+        self.assertEqual(self.store.candidates(1), [])
 
 
 if __name__ == "__main__":
