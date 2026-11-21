@@ -39,6 +39,8 @@ LOCAL_IMAGE = re.compile(r'<img src="@@LOCAL_IMAGES@@/([0-9a-f]{64}\.(?:jpg|png|
 BAD_XML = re.compile(r"[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
 SAFE = frozenset("p section div span br hr a b strong i em u s blockquote pre code h1 h2 h3 h4 h5 h6 ul ol li table thead tbody tr td th figure figcaption sup sub".split())
 DROP = frozenset("script style noscript template iframe object embed form input video audio svg math button select".split())
+CARD_MATCH = """(a.url=d.url OR (a.publisher=d.publisher AND a.title=d.title AND
+    abs(coalesce(a.published,a.found)-coalesce(d.published,d.found))<172800))"""
 
 
 class Refused(RuntimeError):
@@ -231,6 +233,11 @@ class Store:
                 CREATE TABLE IF NOT EXISTS image_repair (
                     article TEXT PRIMARY KEY, checked INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS collection_runs (
+                    id INTEGER PRIMARY KEY, task TEXT NOT NULL, finished INTEGER NOT NULL,
+                    duration_ms INTEGER NOT NULL, outcome TEXT NOT NULL, metrics TEXT NOT NULL,
+                    note TEXT NOT NULL
+                );
             """)
 
     def open(self):
@@ -416,14 +423,19 @@ class Store:
             if db.execute("SELECT 1 FROM attempts WHERE state='verification-or-layout' AND updated>? LIMIT 1",
                           (int(time.time()) - 48 * 3600,)).fetchone():
                 return []
-            return db.execute("""SELECT d.* FROM discovered_cards d WHERE
+            return db.execute(f"""SELECT d.* FROM discovered_cards d WHERE
                 NOT EXISTS(SELECT 1 FROM attempts t WHERE t.url=d.url AND
                     (t.state='verification-or-layout' OR t.updated>?))
-                AND NOT EXISTS(SELECT 1 FROM articles a WHERE a.url=d.url OR (
-                    a.publisher=d.publisher AND a.title=d.title AND
-                    abs(coalesce(a.published,a.found)-coalesce(d.published,d.found))<172800))
+                AND NOT EXISTS(SELECT 1 FROM articles a WHERE {CARD_MATCH})
                 ORDER BY coalesce(d.published,d.found) DESC, d.url LIMIT ?""",
                               (int(time.time()) - 6 * 3600, limit)).fetchall()
+
+    def record_run(self, task, started, outcome, metrics, note):
+        with closing(self.open()) as db, db:
+            db.execute("""INSERT INTO collection_runs(task,finished,duration_ms,outcome,metrics,note)
+                VALUES (?,?,?,?,?,?)""", (task, int(time.time()), round((time.monotonic() - started) * 1000),
+                                          outcome, json.dumps(metrics), note))
+            db.execute("DELETE FROM collection_runs WHERE id <= (SELECT max(id)-100 FROM collection_runs)")
 
     def latest(self, publisher=None):
         where, params = ("WHERE publisher=?", (publisher,)) if publisher else ("", ())
@@ -501,6 +513,31 @@ def run_lock(store):
         yield
 
 
+@contextmanager
+def observe(store, task, metrics):
+    started = time.monotonic()
+    outcome, note = "ok", ""
+    try:
+        yield
+    except DesktopBusy as error:
+        outcome, note = "skipped", str(error)
+        raise
+    except (Exception, KeyboardInterrupt):
+        outcome, note = "error", "See the collector's service log for details."
+        raise
+    finally:
+        if task:
+            try:
+                store.record_run(task, started, outcome, metrics, note)
+            except sqlite3.Error:
+                print("Collector: could not save run statistics.", file=sys.stderr)
+
+
+def archived_markup(row, image_base):
+    content = PENDING_IMAGE.sub("[Image unavailable]", row["html"])
+    return LOCAL_IMAGE.sub(lambda m: f'<img src="{escape(image_base, quote=True)}/{m[1]}"', content)
+
+
 def render_rss(store, publisher, site, selector):
     tag = "{http://purl.org/rss/1.0/modules/content/}encoded"
     rss = Element("rss", {"version": "2.0"})
@@ -518,12 +555,12 @@ def render_rss(store, publisher, site, selector):
         sub(it, "category", row["publisher"])
         sub(it, "pubDate", format_datetime(datetime.fromtimestamp(row["published"] or row["found"], UTC), usegmt=True))
         sub(it, "description", escape(row["description"]))
-        content = PENDING_IMAGE.sub("[Image unavailable]", row["html"])
-        sub(it, tag, LOCAL_IMAGE.sub(lambda m: f'<img src="{site}/image/{m[1]}"', content))
+        sub(it, tag, archived_markup(row, site + "/image"))
     return tostring(rss, encoding="utf-8", xml_declaration=True)
 
 
 def serve(config, store, token, origin):
+    from dashboard import render_article, render_dashboard
     site = origin + "/" + token
     publishers = config.get("publishers", {})
 
@@ -542,12 +579,27 @@ def serve(config, store, token, origin):
             self.reply(include_body=False)
 
         def reply(self, include_body):
-            secret, _, route = self.path.lstrip("/").partition("/")
+            path, _, query = self.path.partition("?")
+            secret, _, route = path.lstrip("/").partition("/")
             if not re.fullmatch(r"[0-9a-f]{64}", secret) or not hmac.compare_digest(secret, token):
                 self.send_error(404)
                 return
             try:
-                if route == "all.xml" or route.endswith(".xml") and route[:-4] in publishers:
+                if route == "dashboard":
+                    try:
+                        params = parse_qs(query, max_num_fields=8)
+                    except ValueError:
+                        self.send_error(400)
+                        return
+                    body = render_dashboard(store, config, params)
+                    mime, lifetime = "text/html; charset=utf-8", None
+                elif re.fullmatch(r"article/[1-9][0-9]{0,17}", route):
+                    body = render_article(store, int(route.split("/")[1]))
+                    if body is None:
+                        self.send_error(404)
+                        return
+                    mime, lifetime = "text/html; charset=utf-8", None
+                elif route == "all.xml" or route.endswith(".xml") and route[:-4] in publishers:
                     body = render_rss(store, None if route == "all.xml" else publishers[route[:-4]], site, route[:-4])
                     mime, lifetime = "application/rss+xml; charset=utf-8", 120
                 elif route.startswith("image/") and ASSET_NAME.fullmatch(route[6:]):
@@ -565,9 +617,12 @@ def serve(config, store, token, origin):
                 self.send_response(200)
                 self.send_header("Content-Type", mime)
                 self.send_header("Content-Length", str(len(body)))
-                self.send_header("Cache-Control", f"private, max-age={lifetime}")
+                self.send_header("Cache-Control", f"private, max-age={lifetime}" if lifetime is not None else "no-store")
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Referrer-Policy", "no-referrer")
+                if mime.startswith("text/html"):
+                    self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+                    self.send_header("X-Robots-Tag", "noindex, nofollow")
                 self.end_headers()
                 if include_body:
                     self.wfile.write(body)
@@ -613,6 +668,8 @@ def main():
     sub.add_parser("serve", help="Serve private feeds and cached images on loopback.")
     u = sub.add_parser("url", help="Print a private RSS URL. Do not share its token.")
     u.add_argument("publisher", nargs="?", default="all", help="Publisher ID or all.")
+    sub.add_parser("dashboard-url", help="Print the private dashboard URL. Do not share its token.")
+    sub.add_parser("stats", help="Show archive coverage and recent run statistics as JSON.")
     a = sub.add_parser("add", help="Fetch a supplied link through ordinary HTTP; hold it if verification is required.")
     a.add_argument("url")
     a.add_argument("--retry", action="store_true", help="Manually retry a held URL.")
@@ -646,6 +703,11 @@ def main():
             if args.publisher != "all" and args.publisher not in config.get("publishers", {}):
                 raise Refused("Unknown publisher ID.")
             print(f"{origin}/{access}/{args.publisher}.xml")
+        elif args.command == "dashboard-url":
+            print(f"{origin}/{access}/dashboard")
+        elif args.command == "stats":
+            from dashboard import overview
+            print(json.dumps(overview(store, config), ensure_ascii=False, indent=2))
         elif args.command == "status":
             with closing(store.open()) as db:
                 for row in db.execute("SELECT publisher,count(*) AS articles,sum(image_count) AS images,sum(missing_images) AS missing FROM articles GROUP BY publisher"):
@@ -654,7 +716,10 @@ def main():
                                   "held_verification": db.execute("SELECT count(*) FROM attempts WHERE state='verification-or-layout'").fetchone()[0],
                                   "articles_with_queued_images": db.execute("SELECT count(*) FROM image_repair").fetchone()[0]}))
         else:
-            with run_lock(store):
+            task = {"discover": f"discover ({getattr(args, 'source', '')})", "check": "desktop check",
+                    "notify": "alerts", "repair-images": "image repair", "capture-open": "desktop capture"}.get(args.command)
+            metrics = {}
+            with run_lock(store), observe(store, task, metrics):
                 if args.command == "add":
                     show(store.request_article(args.url, retry=args.retry, timezone=zone))
                 elif args.command == "from-native":
@@ -673,35 +738,43 @@ def main():
                     notification_file = config.get("discord_webhook_file")
                     if not notification_file and not args.if_configured:
                         raise Refused("No Discord webhook has been configured.")
-                    print(json.dumps({"delivered": store.notify(notification_file) if notification_file else 0}))
+                    metrics.update(configured=bool(notification_file),
+                                   delivered=store.notify(notification_file) if notification_file else 0)
+                    print(json.dumps({"delivered": metrics["delivered"]}))
                 elif args.command == "repair-images":
-                    print(json.dumps({"resolved_image_references": store.repair_images(args.limit)}))
+                    metrics["resolved_image_references"] = store.repair_images(args.limit)
+                    print(json.dumps(metrics))
                 elif args.command == "discover":
                     from discovery import legacy_cards, native_cards
                     cards = (native_cards if args.source == "native" else legacy_cards)(config)
                     added = store.discover(cards, set(config.get("publishers", {}).values()))
-                    held = 0
+                    metrics.update(discovered=added, links_read=len(cards), web_requests=0, held_this_run=0, new_articles=0)
                     for index, row in enumerate(store.candidates(args.fetch)):
                         if index:
                             time.sleep(2)
                         try:
-                            show(store.request_article(row["url"], row["publisher"], zone))
+                            metrics["web_requests"] += 1
+                            result = store.request_article(row["url"], row["publisher"], zone)
+                            metrics["new_articles"] += int(result[1])
+                            show(result)
                         except Refused:
-                            held += 1
+                            metrics["held_this_run"] += 1
                             # Don't try more public article requests this run after a refusal.
                             break
-                    print(json.dumps({"discovered": added, "cards_read": len(cards), "held_this_run": held}))
+                    print(json.dumps(metrics | {"cards_read": metrics["links_read"]}))
                 else:
                     from desktop import Desktop
                     desktop = Desktop(config)
                     if args.command == "capture-open":
                         url, clipboard = desktop.capture()
-                        show(store.ingest(url, clipboard, args.publisher, zone))
+                        result = store.ingest(url, clipboard, args.publisher, zone)
+                        metrics["new_articles"] = int(result[1])
+                        show(result)
                     else:
                         if args.activate and args.skip_busy:
                             raise Refused("--activate is for manual runs; use --skip-busy alone in a timer.")
                         idle = max(60, min(int(config.get("minimum_desktop_idle_seconds", 120)), 3600)) if args.skip_busy else 0
-                        desktop.check(store, zone, args.activate, minimum_idle=idle)
+                        desktop.check(store, zone, args.activate, minimum_idle=idle, metrics=metrics)
                         if not args.skip_busy and config.get("discord_webhook_file"):
                             print(json.dumps({"delivered": store.notify(config["discord_webhook_file"])}))
     except DesktopBusy as error:

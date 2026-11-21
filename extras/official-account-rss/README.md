@@ -20,6 +20,14 @@ chmod 600 config.json
 
 Run `.venv/bin/python collector.py url my-publisher` or `... url all` to get a feed URL. It includes a private key for the RSS and its images, so do not share it in chat, commit it, or put it in a shared log. The listener binds only to loopback. To subscribe from a different computer, tunnel the port with SSH and point a local reader at it. The server never fetches an upstream image in response to an RSS reader request.
 
+### Dashboard
+
+Run `.venv/bin/python collector.py dashboard-url` and open the result privately. It uses the same loopback listener, token, and optional SSH tunnel as RSS. There is no public index page. The dashboard can open saved articles, filter and page through the inventory, and show which URLs still need capture. To get the overview as JSON without opening a browser, run `.venv/bin/python collector.py stats`.
+
+- **Discovered links** are unique URLs seen in delivered cards, not the contents of an account's entire archive. The coverage bars count how many of those URLs match a saved body. Matching uses the exact URL or the same publisher and title within two days, the same as the discovery queue.
+- **Saved bodies** can include articles imported directly that were never found in delivered cards. Image counts describe local image files and missing references separately.
+- **Pages scanned** counts actual inbox views read by the desktop collector, not publisher history pages or dashboard pagination. The run log retains the most recent 100 recorded steps and shows the latest 20. It starts when this update is installed; old console logs are not imported. Dashboard requests never trigger collection.
+
 The article cache is a separate SQLite database plus digest-named images in `state/`. Back up that directory privately. Multinode access, public ingress, and long-term image pruning are not configured here. Sanitization retains semantic formatting and local images, not original fonts, scripts, adverts, video embeds, or custom styling.
 
 Article text is saved before image requests start. Allowlisted CDN images that couldn't be downloaded can be restored with `collector.py repair-images` without another article request or desktop interaction. This is bounded and delays repeat image failures for 12 hours. Until a valid image is cached, the feed shows a placeholder and never sends the reader to the CDN. Articles captured before the repair queue was introduced need to be recaptured if they have missing images.

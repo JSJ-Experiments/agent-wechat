@@ -271,7 +271,9 @@ timeout 3 xclip -selection clipboard -out -t text/html
             except Refused:
                 pass
 
-    def check(self, store, zone, activate, minimum_idle=0):
+    def check(self, store, zone, activate, minimum_idle=0, metrics=None):
+        metrics = {} if metrics is None else metrics
+        metrics.update(pages_scanned=0, matched_visible_cards=0, article_views_opened=0, new_articles=0)
         if minimum_idle:
             self.require_idle(minimum_idle)
         if self.get("/api/status/auth").get("status") != "logged_in":
@@ -282,16 +284,16 @@ timeout 3 xclip -selection clipboard -out -t text/html
         main = self.main()
         pages = max(1, min(int(self.config.get("visible_pages", 1)), 4))
         limit = max(1, min(int(self.config.get("articles_per_check", 2)), 5))
-        scanned = saved = attempts = 0
         visited = set()
         for page in range(pages):
             rect = self.pane(main, activate=activate and page == 0)
             feed = self.screenshot().crop(rect)
+            metrics["pages_scanned"] += 1
             for y, end in card_bands(feed):
                 publisher = publisher_match(ocr(feed.crop((96, y + 15, 369, y + 42))).strip(), names)
                 if not publisher:
                     continue
-                scanned += 1
+                metrics["matched_visible_cards"] += 1
                 max_y = min(y + 88, end - 5)
                 title = normalize(ocr(feed.crop((73, y + 44, 424, max_y))))
                 if len(title) < 4:
@@ -306,14 +308,14 @@ timeout 3 xclip -selection clipboard -out -t text/html
                 region = (70, y + 15, 430, max_y)
                 if fresh.crop(region).tobytes() != feed.crop(region).tobytes() or self.pane(main) != rect:
                     raise DesktopBusy("The official-account inbox changed during discovery; will retry later.")
-                if minimum_idle and attempts == 0 and page == 0:
+                if minimum_idle and metrics["article_views_opened"] == 0 and page == 0:
                     self.require_idle(minimum_idle)
                 self.click(main, rect[0] + 145, rect[1] + y + 54)
                 time.sleep(2.2)
                 win = self.active()
                 if win == main or self.title(win) != "WeChat":
                     raise Refused("The selected story did not open an article viewer.")
-                attempts += 1
+                metrics["article_views_opened"] += 1
                 try:
                     url, markup = self.capture()
                 finally:
@@ -325,16 +327,16 @@ timeout 3 xclip -selection clipboard -out -t text/html
                 article, added = store.ingest(url, markup, publisher, zone)
                 show((article, added))
                 store.mark_card(key)  # Image repair has its own durable work queue.
-                saved += int(added)
-                if attempts >= limit:
+                metrics["new_articles"] += int(added)
+                if metrics["article_views_opened"] >= limit:
                     break
                 time.sleep(1.0)
-            if attempts >= limit or page + 1 >= pages:
+            if metrics["article_views_opened"] >= limit or page + 1 >= pages:
                 break
             self.pane(main)
-            if minimum_idle and attempts == 0 and page == 0:
+            if minimum_idle and metrics["article_views_opened"] == 0 and page == 0:
                 self.require_idle(minimum_idle)
             self.docker("sh", "-c", 'test "$(xdotool getactivewindow)" = "$1" && xdotool mousemove "$2" "$3" click --repeat 4 5',
                         "collector", main, rect[0] + 320, rect[1] + 470)
             time.sleep(.9)
-        print(json.dumps({"matched_visible_cards": scanned, "article_views_opened": attempts, "new_articles": saved}))
+        print(json.dumps(metrics))
