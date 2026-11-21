@@ -171,6 +171,51 @@ def message_point(nodes, rect, kind, title):
     return next(iter(points)) if len(points) == 1 else None
 
 
+def message_row(nodes, rect, kind, title):
+    """Return the exact visible File Transfer row when Qt exposes no inner controls."""
+    left, top, right, bottom = rect
+    rows = set()
+    for node in nodes:
+        b = node.get("bounds") or {}
+        x, y, w, h = (round(b.get(k, 0)) for k in ("x", "y", "width", "height"))
+        name = node.get("name") or ""
+        lines = [tidy(line) for line in name.splitlines() if tidy(line)]
+        matches = tidy(name) == title if kind == "text" else bool(lines and title in lines and lines[0] != "File")
+        if (matches and node.get("role") == "list-item" and 680 <= w <= 710 and 36 <= h <= 260
+                and left <= x < x + w <= right and top <= y < y + h <= bottom):
+            rows.add((x, y, w, h))
+    return next(iter(rows)) if len(rows) == 1 else None
+
+
+def bubble_point(image, row, kind):
+    """Find the right-aligned outgoing bubble in the verified light-theme message row."""
+    x, y, w, h = row
+    if x < 0 or y < 0 or x + w > image.width or y + h > image.height:
+        return None
+    if kind == "text":
+        def fill(color):
+            r, g, b = color[:3]
+            return g >= 180 and g - r >= 35 and g - b >= 70
+    else:
+        def fill(color):
+            return min(color[:3]) >= 252
+    runs = []
+    start = None
+    for col in range(x + 210, x + w - 58):
+        solid = sum(fill(image.getpixel((col, y + dy))) for dy in range(9, 15)) >= 4
+        if solid and start is None:
+            start = col
+        if not solid and start is not None:
+            runs.append((start, col))
+            start = None
+    minimum = 25 if kind == "text" else 150
+    candidates = [(a, b) for a, b in runs if b - a >= minimum and x + w - 95 <= b <= x + w - 61]
+    if len(candidates) != 1:
+        return None
+    a, b = candidates[0]
+    return a + min(26, (b - a) // 2), y + 24
+
+
 @contextmanager
 def desktop_lease():
     runtime = os.environ.get("XDG_RUNTIME_DIR")
@@ -308,6 +353,13 @@ class Desktop:
                       and y + 20 <= n["bounds"]["y"] <= y + 65 for n in nodes)
         return nodes, (x, y, w, h), heading
 
+    def filehelper_point(self, nodes, rect, kind, label):
+        point = message_point(nodes, rect, kind, label)
+        if point is not None:
+            return point
+        row = message_row(nodes, rect, kind, label)
+        return bubble_point(self.screenshot(), row, kind) if row else None
+
     def capture_received(self, expected, kind, label, minimum_idle, metrics):
         self.require_idle(minimum_idle)
         if self.get("/api/status/auth").get("status") != "logged_in":
@@ -330,12 +382,12 @@ class Desktop:
                 raise DesktopBusy("The desktop did not open the expected File Transfer pane.")
         else:
             self.require_idle(minimum_idle)
-        rect = (x + 275, y + 70, x + w - 5, y + h - 145)
-        point = message_point(nodes, rect, kind, label)
+        rect = (x + 272, y + 70, x + w - 2, y + h - 145)
+        point = self.filehelper_point(nodes, rect, kind, label)
         if point is None:
             raise DesktopBusy("The exact link is not exposed in the visible File Transfer pane; open it manually.")
         fresh, _, in_filehelper = self.filehelper_layout(main)
-        if not in_filehelper or message_point(fresh, rect, kind, label) != point:
+        if not in_filehelper or self.filehelper_point(fresh, rect, kind, label) != point:
             raise DesktopBusy("The File Transfer pane changed; no link was opened.")
         self.click(main, *point)
         time.sleep(2.5)

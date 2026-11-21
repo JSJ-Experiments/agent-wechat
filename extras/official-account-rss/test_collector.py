@@ -8,10 +8,10 @@ from unittest.mock import patch
 from urllib.error import URLError
 from xml.etree.ElementTree import fromstring
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from collector import DesktopBusy, Refused, Store, article_url, image_url, native_links, process_desktop_submissions, render_rss
-from desktop import Desktop, card_bands, filehelper_articles, message_point, publisher_match
+from desktop import Desktop, bubble_point, card_bands, filehelper_articles, message_point, message_row, publisher_match
 from read_legacy_cards import articles
 
 URL = "https://mp.weixin.qq.com/s/fixtureTest"
@@ -150,6 +150,21 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(message_point([node], rect, "card", "Fixture & News"), (60, 35))
         self.assertIsNone(message_point([node], (30, 0, 130, 130), "card", "Fixture & News"))
         self.assertIsNone(message_point([node, node | {"bounds": node["bounds"] | {"y": 60}}], rect, "card", "Fixture & News"))
+
+    def test_filehelper_row_fallback_requires_both_exact_text_and_an_outgoing_bubble(self):
+        bounds = {"x": 5, "y": 20, "width": 704, "height": 54}
+        node = {"role": "list-item", "name": URL + "\n ", "bounds": bounds}
+        row = (5, 20, 704, 54)
+        rect = (0, 3, 710, 120)
+        self.assertEqual(message_row([node], rect, "text", URL), row)
+        self.assertIsNone(message_row([node], rect, "text", URL + "other"))
+        dupe = node | {"bounds": bounds | {"y": 60}}
+        self.assertIsNone(message_row([node, dupe], rect, "text", URL))
+        screen = Image.new("RGB", (710, 130), (237, 237, 237))
+        self.assertIsNone(bubble_point(screen, row, "text"))
+        ImageDraw.Draw(screen).rectangle((435, 28, 637, 64), fill=(149, 236, 100))
+        self.assertEqual(bubble_point(screen, row, "text"), (461, 44))
+        self.assertIsNone(bubble_point(screen, row, "card"))
 
     def test_reject_nonwechat_and_active_image_urls(self):
         for raw in ("https://example.org/s/article", "https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha",
