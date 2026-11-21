@@ -97,6 +97,31 @@ async function runCli(args, allowNeedsReview = false) {
 async function cli(...args) {
   return runCli(["--server", hub.ready.endpoint, "--token-file", hub.ready.tokenFile, "--account", "personal", ...args]);
 }
+const migrationCheck = process.env.WX_LEGACY_MIGRATION_CHECK === "1";
+const migrationArchive = join(temporary, "native-recorder-canary.db");
+async function recordMigrationPage() {
+  const { stdout } = await execute("python3", [
+    join(repository, "extras/legacy-migration/native_record_batch.py"),
+    "--server", hub.ready.endpoint, "--token-file", hub.ready.tokenFile,
+    "--account", "personal", "--archive", migrationArchive, "--limit", "50",
+  ], { timeout: 60000 });
+  return JSON.parse(stdout);
+}
+async function assertCanaryMessage(cursor, message) {
+  let page;
+  for (let batch = 0; batch < 8; batch += 1) {
+    page = await recordMigrationPage();
+    if (BigInt(page.next_cursor) >= BigInt(cursor)) break;
+  }
+  assert.ok(BigInt(page.next_cursor) >= BigInt(cursor), "native canary did not reach the expected event");
+  const { stdout } = await execute("python3", ["-c", [
+    "import sqlite3, sys",
+    "with sqlite3.connect(sys.argv[1]) as db:",
+    "    print(db.execute('SELECT payload FROM recorded_messages WHERE id=?', (sys.argv[2],)).fetchone()[0])",
+  ].join("\n"), migrationArchive, message.id], { timeout: 10000 });
+  const recorded = JSON.parse(stdout);
+  for (const key of ["id", "threadId", "serverId", "body", "type", "direction"]) assert.equal(recorded[key], message[key]);
+}
 async function login(account, scanned = false) {
   await a.createAccount(account);
   const operation = await a.login(account, { strategy: "qr", qrRefresh: { mode: "manual", maxRefreshes: 0 } }, `login-${account}`);
@@ -378,6 +403,7 @@ try {
   assert.equal((await a.messages("personal", "sim_mei")).items.filter(item => item.body === "Sent from client A").length, 1);
   assert.equal((await remoteState()).accounts.find(item => item.id === "personal").acceptedSends, 1);
 
+  if (migrationCheck) assert.equal((await recordMigrationPage()).baseline_only, true);
   const beforeSelfSync = streamA.events.at(-1).cursor;
   await control({ op: "inbound", account: "personal", peer: "filehelper", body: "Synthetic send from another device", self_sent: true });
   const selfA = await committed(streamA, "outgoing", beforeSelfSync);
@@ -392,6 +418,7 @@ try {
   assert.equal((await b.thread("personal", "filehelper")).unreadCount, 0);
   assert.equal((await cli("status")).serverId, initialStatus.serverId);
   assert.equal((await cli("messages", "get", "filehelper", selfMessage.id)).body, selfMessage.body);
+  if (migrationCheck) await assertCanaryMessage(selfA.cursor, selfMessage);
 
   await pinJourney([streamA, streamB]);
   const quoteMentionReceipts = await quoteMentionJourney();
@@ -402,8 +429,10 @@ try {
   const incomingB = await committed(streamB, "incoming", beforeInbound);
   assert.equal(incomingA.data.messageId, incomingB.data.messageId);
   assert.equal(incomingA.data.origin, "live");
-  assert.equal((await b.message("personal", incomingB.data.messageId)).body, "Incoming through real sync");
-  if (process.env.WX_LEGACY_MIGRATION_CHECK === "1") {
+  const incoming = await b.message("personal", incomingB.data.messageId);
+  assert.equal(incoming.body, "Incoming through real sync");
+  if (migrationCheck) {
+    await assertCanaryMessage(incomingA.cursor, incoming);
     const tool = join(repository, "extras/legacy-migration/native_shadow.py");
     const { stdout } = await execute("python3", [
       tool, "--server", hub.ready.endpoint, "--token-file", hub.ready.tokenFile,
