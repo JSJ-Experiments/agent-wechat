@@ -241,6 +241,9 @@ class Store:
                 CREATE TABLE IF NOT EXISTS submissions (
                     url TEXT PRIMARY KEY, submitted INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS desktop_holds (
+                    url TEXT PRIMARY KEY, updated INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS followed_publishers (
                     id TEXT PRIMARY KEY, publisher TEXT NOT NULL
                 );
@@ -448,7 +451,19 @@ class Store:
             if db.execute("SELECT count(*) FROM submissions s WHERE NOT EXISTS(SELECT 1 FROM articles a WHERE a.url=s.url)").fetchone()[0] >= 1000:
                 return "full"
             db.execute("INSERT OR IGNORE INTO submissions VALUES (?,?)", (url, int(time.time())))
+            db.execute("DELETE FROM desktop_holds WHERE url=?", (url,))
             return "queued"
+
+    def pending_desktop_submissions(self):
+        with closing(self.open()) as db:
+            return {row[0] for row in db.execute("""SELECT s.url FROM submissions s
+                WHERE NOT EXISTS(SELECT 1 FROM articles a WHERE a.url=s.url)
+                AND NOT EXISTS(SELECT 1 FROM desktop_holds h WHERE h.url=s.url)
+                LIMIT 1000""")}
+
+    def hold_desktop_submission(self, url):
+        with closing(self.open()) as db, db:
+            db.execute("INSERT OR REPLACE INTO desktop_holds VALUES (?,?)", (url, int(time.time())))
 
     def candidates(self, limit, *, submissions_only=False, publishers=None):
         allowed = sorted(publishers) if publishers is not None else None
@@ -573,7 +588,7 @@ def observe(store, task, metrics):
         outcome, note = "error", "See the collector's service log for details."
         raise
     finally:
-        if task and not (task == "submitted URLs" and outcome == "ok" and not metrics.get("web_requests")):
+        if task and not (task == "submitted URLs" and outcome == "ok" and not metrics.get("matched_submissions")):
             try:
                 store.record_run(task, started, outcome, metrics, note)
             except sqlite3.Error:
@@ -751,6 +766,36 @@ def process_candidates(store, limit, zone, metrics, *, submissions_only=False, p
             break  # One refusal ends public requests in this run.
 
 
+def process_desktop_submissions(store, config, zone, metrics):
+    from desktop import Desktop, desktop_lease
+    metrics.update(matched_submissions=0, article_views_opened=0, desktop_holds=0, new_articles=0)
+    pending = store.pending_desktop_submissions()
+    if not pending:
+        return
+    desktop = Desktop(config)
+    matched = [(url, item) for url, item in desktop.filehelper_links().items() if url in pending]
+    metrics["matched_submissions"] = len(matched)
+    if not matched:
+        return
+    expected, (kind, label) = matched[0]
+    idle = max(60, min(int(config.get("minimum_desktop_idle_seconds", 120)), 3600))
+    try:
+        with desktop_lease():
+            url, markup = desktop.capture_received(expected, kind, label, idle, metrics)
+    except DesktopBusy:
+        raise
+    except Refused as error:
+        store.hold_desktop_submission(expected)
+        metrics["desktop_holds"] += 1
+        print(f"Desktop capture paused: {error}")
+        return
+    if url != expected:
+        raise Refused("The viewer reported a different URL; nothing was archived.")
+    result = store.ingest(url, markup, timezone=zone)
+    metrics["new_articles"] += int(result[1])
+    show(result)
+
+
 def native_links(payload):
     """Only extract explicit article link cards, never arbitrary chat text."""
     if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
@@ -783,7 +828,7 @@ def main():
     dash = sub.add_parser("dashboard-url", help="Print the browser dashboard URL.")
     dash.add_argument("--local", action="store_true", help="Use the loopback URL with its private access token.")
     sub.add_parser("stats", help="Show archive coverage and recent run statistics as JSON.")
-    sub.add_parser("process-submissions", help="Try at most one submitted URL, obeying the normal public cooldown.")
+    sub.add_parser("process-submissions", help="Read a queued link from File Transfer in the signed-in desktop viewer.")
     a = sub.add_parser("add", help="Fetch a supplied link through ordinary HTTP; hold it if verification is required.")
     a.add_argument("url")
     a.add_argument("--retry", action="store_true", help="Manually retry a held URL.")
@@ -794,6 +839,7 @@ def main():
     i.add_argument("--publisher", help="Require an exact official-account display name.")
     c = sub.add_parser("capture-open", help="Capture the article already foregrounded in the desktop client.")
     c.add_argument("--publisher", help="Require an exact official-account display name.")
+    c.add_argument("--url", help="Require the viewer to report this exact official-account article URL.")
     r = sub.add_parser("check", help="Scan the current official-account inbox for recent posts from configured publishers.")
     r.add_argument("--activate", action="store_true", help="Open Official Accounts first when the desktop main window is active.")
     r.add_argument("--skip-busy", action="store_true", help="For a timer: skip when the shared desktop is in use.")
@@ -863,7 +909,7 @@ def main():
                     metrics["resolved_image_references"] = store.repair_images(args.limit)
                     print(json.dumps(metrics))
                 elif args.command == "process-submissions":
-                    process_candidates(store, 1, zone, metrics, submissions_only=True)
+                    process_desktop_submissions(store, config, zone, metrics)
                     print(json.dumps(metrics))
                 elif args.command == "discover":
                     from discovery import legacy_snapshot, native_cards
@@ -882,10 +928,14 @@ def main():
                     process_candidates(store, args.fetch, zone, metrics, publishers=publishers)
                     print(json.dumps(metrics | {"cards_read": metrics["links_read"]}))
                 else:
-                    from desktop import Desktop
+                    from desktop import Desktop, desktop_lease
                     desktop = Desktop(config | {"publishers": store.publisher_map(config)})
                     if args.command == "capture-open":
-                        url, clipboard = desktop.capture()
+                        expected = article_url(args.url) if args.url else None
+                        with desktop_lease():
+                            url, clipboard = desktop.capture()
+                        if expected and expected != url:
+                            raise Refused("The viewer reported a different article URL; nothing was archived.")
                         result = store.ingest(url, clipboard, args.publisher, zone)
                         metrics["new_articles"] = int(result[1])
                         show(result)
@@ -893,11 +943,12 @@ def main():
                         if args.activate and args.skip_busy:
                             raise Refused("--activate is for manual runs; use --skip-busy alone in a timer.")
                         idle = max(60, min(int(config.get("minimum_desktop_idle_seconds", 120)), 3600)) if args.skip_busy else 0
-                        desktop.check(store, zone, args.activate, minimum_idle=idle, metrics=metrics)
+                        with desktop_lease():
+                            desktop.check(store, zone, args.activate, minimum_idle=idle, metrics=metrics)
                         if not args.skip_busy and config.get("discord_webhook_file"):
                             print(json.dumps({"delivered": store.notify(config["discord_webhook_file"])}))
     except DesktopBusy as error:
-        if args.command == "check" and args.skip_busy:
+        if args.command == "process-submissions" or (args.command == "check" and args.skip_busy):
             print(f"Skipped: {error}")
         else:
             parser.exit(1, f"Collector: {error}\n")

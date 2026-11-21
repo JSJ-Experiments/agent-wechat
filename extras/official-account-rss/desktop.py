@@ -1,8 +1,10 @@
 """Use the signed-in, legacy Linux desktop viewer via ordinary GUI actions."""
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import UTC
 from difflib import SequenceMatcher
 import base64
+import fcntl
 import hashlib
 import io
 import json
@@ -15,6 +17,7 @@ import unicodedata
 from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
+from lxml import etree
 from PIL import Image
 from collector import DesktopBusy, Refused, StrictRedirect, article_url, parse_article, tidy
 
@@ -118,6 +121,68 @@ def menu_copy_point(im):
             hi = max(row[1] + row[3] for row in group)
             return (lo + hi) // 4, (group[0][2] * 2 + group[0][4]) // 4
     raise Refused("The article viewer's Copy Link menu action was not visible.")
+
+
+def filehelper_articles(messages):
+    """Index exact, received File Transfer links, not snippets from other chats."""
+    if not isinstance(messages, list):
+        raise Refused("The desktop API did not return a message list.")
+    articles = {}
+    for message in messages[:40]:
+        if not isinstance(message, dict) or message.get("chatId") != "filehelper":
+            continue
+        if message.get("type") == 1 and isinstance(message.get("content"), str):
+            link = title = message["content"].strip()
+            kind = "text"
+        elif message.get("type") == 49 and message.get("appMsgType") == 5:
+            raw = message.get("rawContent")
+            if not isinstance(raw, str) or len(raw) > 128_000:
+                continue
+            try:
+                xml = etree.fromstring(raw.encode(), parser=etree.XMLParser(resolve_entities=False, no_network=True))
+            except (etree.XMLSyntaxError, UnicodeError):
+                continue
+            link = (xml.findtext("./appmsg/url") or "").strip()
+            title = tidy(xml.findtext("./appmsg/title") or "")
+            kind = "card"
+        else:
+            continue
+        try:
+            url = article_url(link)
+        except (Refused, ValueError):
+            continue
+        if title and len(title) <= 8192:
+            articles.setdefault(url, (kind, title))
+    return articles
+
+
+def message_point(nodes, rect, kind, title):
+    """Select a unique, tightly bounded title or link inside the message list."""
+    left, top, right, bottom = rect
+    roles = {"link", "label", "push-button"} if kind == "card" else {"link", "label"}
+    points = set()
+    for node in nodes:
+        b = node.get("bounds") or {}
+        x, y, w, h = (b.get(key, 0) for key in ("x", "y", "width", "height"))
+        name = tidy(node.get("name") or "")
+        if (node.get("role") in roles and name == title and 8 <= w <= 550 and 12 <= h <= 130
+                and left <= x < x + w <= right and top <= y < y + h <= bottom):
+            points.add((round(x + w / 2), round(y + h / 2)))
+    return next(iter(points)) if len(points) == 1 else None
+
+
+@contextmanager
+def desktop_lease():
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if not runtime:
+        yield
+        return
+    with (Path(runtime) / "agent-wechat-desktop.lock").open("a") as file:
+        try:
+            fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise DesktopBusy("The message recorder is using the desktop; try again shortly.") from None
+        yield
 
 
 class Desktop:
@@ -228,6 +293,61 @@ class Desktop:
             self.docker("sh", "-c", 'test "$(xdotool getactivewindow)" = "$1" && xdotool key --clearmodifiers alt+F4',
                         "collector", win)
             time.sleep(.55)
+
+    def filehelper_links(self):
+        return filehelper_articles(self.get("/api/messages/filehelper?limit=40&includeRaw=true"))
+
+    def filehelper_layout(self, main):
+        self.check_focus(main)
+        x, y, w, h = self.geometry(main)
+        if (w, h) != (980, 710):
+            raise DesktopBusy("The File Transfer reader requires the tested 980×710 layout.")
+        nodes = list(self.labels(self.get("/api/debug/a11y").get("tree")))
+        heading = any(n.get("role") == "label" and n.get("name") == "File Transfer"
+                      and abs((n.get("bounds") or {}).get("x", 0) - x - 289) <= 8
+                      and y + 20 <= n["bounds"]["y"] <= y + 65 for n in nodes)
+        return nodes, (x, y, w, h), heading
+
+    def capture_received(self, expected, kind, label, minimum_idle, metrics):
+        self.require_idle(minimum_idle)
+        if self.get("/api/status/auth").get("status") != "logged_in":
+            raise DesktopBusy("WeChat is not signed in; no desktop actions were taken.")
+        main = self.main()
+        nodes, (x, y, w, h), in_filehelper = self.filehelper_layout(main)
+        if not in_filehelper:
+            rows = [n["bounds"] for n in nodes if n.get("role") == "list-item" and
+                    ((n.get("name") or "") == "File Transfer" or (n.get("name") or "").startswith("File Transfer "))
+                    and n.get("bounds") and abs(n["bounds"]["x"] - x - 62) <= 8
+                    and y + 67 <= n["bounds"]["y"] <= y + h - 70]
+            if len(rows) != 1:
+                raise DesktopBusy("Open File Transfer on the WeChat desktop to make the shared link visible.")
+            self.require_idle(minimum_idle)
+            row = rows[0]
+            self.click(main, round(row["x"] + 82), round(row["y"] + 32))
+            time.sleep(1.2)
+            nodes, _, in_filehelper = self.filehelper_layout(main)
+            if not in_filehelper:
+                raise DesktopBusy("The desktop did not open the expected File Transfer pane.")
+        else:
+            self.require_idle(minimum_idle)
+        rect = (x + 275, y + 70, x + w - 5, y + h - 145)
+        point = message_point(nodes, rect, kind, label)
+        if point is None:
+            raise DesktopBusy("The exact link is not exposed in the visible File Transfer pane; open it manually.")
+        fresh, _, in_filehelper = self.filehelper_layout(main)
+        if not in_filehelper or message_point(fresh, rect, kind, label) != point:
+            raise DesktopBusy("The File Transfer pane changed; no link was opened.")
+        self.click(main, *point)
+        time.sleep(2.5)
+        win = self.active()
+        if win == main or self.title(win) != "WeChat":
+            raise Refused("The shared link did not open a separate WeChat viewer.")
+        metrics["article_views_opened"] += 1
+        url, markup = self.capture()
+        if url != expected:
+            raise Refused("The viewer reported a different article URL; nothing was archived.")
+        self.close(win)
+        return url, markup
 
     def capture(self):
         main, win = self.main(), self.active()

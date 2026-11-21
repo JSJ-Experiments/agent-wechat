@@ -13,8 +13,9 @@ PAGE_SIZE = 20
 INVENTORY = f"""
 WITH cards AS (
     SELECT d.*, EXISTS(SELECT 1 FROM articles a WHERE {CARD_MATCH}) AS saved,
-           t.state AS attempt
+           CASE WHEN h.url IS NOT NULL THEN 'desktop-needs-user' ELSE t.state END AS attempt
     FROM discovered_cards d LEFT JOIN attempts t ON t.url=d.url
+    LEFT JOIN desktop_holds h ON h.url=d.url
 ), inventory AS (
     SELECT a.rowid AS id, a.url, a.publisher, a.title, a.published, a.found, a.image_count,
            a.missing_images, 'saved' AS status FROM articles a
@@ -22,8 +23,10 @@ WITH cards AS (
     SELECT NULL, url, publisher, title, published, found, 0, 0, coalesce(attempt, 'link-only')
     FROM cards WHERE NOT saved
     UNION ALL
-    SELECT NULL, s.url, NULL, 'Submitted article URL', NULL, s.submitted, 0, 0, coalesce(t.state,'queued')
+    SELECT NULL, s.url, NULL, 'Submitted article URL', NULL, s.submitted, 0, 0,
+           CASE WHEN h.url IS NOT NULL THEN 'desktop-needs-user' ELSE coalesce(t.state,'queued') END
     FROM submissions s LEFT JOIN attempts t ON t.url=s.url
+    LEFT JOIN desktop_holds h ON h.url=s.url
     WHERE NOT EXISTS(SELECT 1 FROM discovered_cards d WHERE d.url=s.url)
     AND NOT EXISTS(SELECT 1 FROM articles a WHERE a.url=s.url)
     UNION ALL
@@ -95,7 +98,8 @@ margin-bottom:20px;font-size:1.55rem}.login-card .muted{margin-top:8px}.login-fo
 STATUSES = {
     "saved": "Saved body",
     "link-only": "Link only",
-    "queued": "Queued",
+    "queued": "Waiting for desktop",
+    "desktop-needs-user": "Needs manual capture",
     "verification-or-layout": "Needs viewer",
     "temporarily-unavailable": "Temporarily unavailable",
 }
@@ -103,6 +107,7 @@ METRICS = {
     "links_read": "link occurrences read", "discovered": "new unique links", "web_requests": "web attempts",
     "held_this_run": "unsuccessful web attempts", "new_articles": "new bodies",
     "pages_scanned": "desktop pages scanned", "matched_visible_cards": "matching visible cards",
+    "matched_submissions": "matching File Transfer links", "desktop_holds": "desktop captures paused",
     "article_views_opened": "viewers opened", "resolved_image_references": "image references repaired",
     "delivered": "alerts sent",
     "followed_publishers": "active official accounts",
@@ -128,7 +133,7 @@ def read_overview(db, config):
     totals = dict(db.execute(INVENTORY + """SELECT count(*) AS discovered,coalesce(sum(saved),0) AS matched,
                         min(published) AS oldest_discovered,max(published) AS latest_discovered FROM cards""").fetchone())
     totals.update(saved=counts.get("saved", 0), link_only=counts.get("link-only", 0),
-                  needs_viewer=counts.get("verification-or-layout", 0),
+                  needs_viewer=counts.get("verification-or-layout", 0) + counts.get("desktop-needs-user", 0),
                   queued=counts.get("queued", 0),
                   temporarily_unavailable=counts.get("temporarily-unavailable", 0))
     totals.update(db.execute("""SELECT
@@ -226,7 +231,8 @@ def render_dashboard(store, config, params, *, web=False):
         else:
             title = f'<a class="entry-title" href="{url}" rel="noreferrer">{title}</a>'
             detail = ""
-        badge_class = {"saved": "saved", "verification-or-layout": "wait", "queued": "wait"}.get(row["status"], "")
+        badge_class = ("saved" if row["status"] == "saved" else
+                       "wait" if row["status"] in {"verification-or-layout", "desktop-needs-user", "queued"} else "")
         date_label = f" · {date}" if row["published"] else ""
         records.append(f'<li><div class="entry-top">{title}<span class="badge {badge_class}">{badge}</span></div>'
                        f'<small>{publisher}{date_label}{detail}</small></li>')
@@ -254,7 +260,8 @@ def render_dashboard(store, config, params, *, web=False):
     nav = " ".join(part for part in (link(curr-1, "← Previous") if curr > 1 else "", f"<span>Page {curr} of {pages}</span>",
                                       link(curr+1, "Next →") if curr < pages else "") if part)
     alerts = "Configured" if data["alerts_configured"] else "Not configured"
-    submission = {"saved": "That URL is already archived.", "queued": "URL added to the capture queue.",
+    submission = {"saved": "That URL is already archived.",
+                  "queued": "Queued. Share the same link to File Transfer in WeChat for desktop capture.",
                   "full": "The capture queue is full.", "invalid": "Enter an official WeChat article URL."}.get(selected("submission", ""))
     banner = f'<div class="notice" role="status">{escape(submission)}</div>' if web and submission else ""
     controls = """<aside class="quick-add" aria-labelledby="add-heading"><h2 id="add-heading">Add an article</h2>
@@ -263,7 +270,8 @@ def render_dashboard(store, config, params, *, web=False):
     <input type="url" name="url" placeholder="https://mp.weixin.qq.com/s/…" maxlength="8192" required></label>
     <button class="primary" type="submit">Queue article</button></form>""" + (
         f'<small role="status">{escape(submission)}</small>' if submission else
-        '<small>Paste an official-account article link. Protected posts may need the signed-in viewer.</small>'
+        '<small>Paste an official-account article link, then share the same link to File Transfer in WeChat. '
+        'The collector uses the signed-in desktop viewer and never sends a message.</small>'
     ) + "</aside>" if web else ""
     header_actions = ('<a class="button" href="feeds">RSS feeds</a><form method="post" action="logout">'
                       '<button type="submit">Sign out</button></form>') if web else (

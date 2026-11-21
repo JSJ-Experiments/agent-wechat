@@ -1,5 +1,6 @@
 import io
 import json
+from datetime import UTC
 from pathlib import Path
 import tempfile
 import unittest
@@ -9,8 +10,8 @@ from xml.etree.ElementTree import fromstring
 
 from PIL import Image
 
-from collector import DesktopBusy, Refused, Store, article_url, image_url, native_links, render_rss
-from desktop import Desktop, card_bands, publisher_match
+from collector import DesktopBusy, Refused, Store, article_url, image_url, native_links, process_desktop_submissions, render_rss
+from desktop import Desktop, card_bands, filehelper_articles, message_point, publisher_match
 from read_legacy_cards import articles
 
 URL = "https://mp.weixin.qq.com/s/fixtureTest"
@@ -99,6 +100,56 @@ class CollectorTests(unittest.TestCase):
                 with self.assertRaises(Refused):
                     self.store.request_article(URL)
         fetch.assert_called_once()
+
+    def test_submitted_urls_wait_for_a_matching_received_link(self):
+        self.store.submit_url(URL)
+        metrics = {}
+        with patch("desktop.Desktop.filehelper_links", return_value={}), patch("desktop.Desktop.capture_received") as capture:
+            process_desktop_submissions(self.store, {}, UTC, metrics)
+            capture.assert_not_called()
+        self.assertEqual(metrics["matched_submissions"], 0)
+        self.assertEqual(self.store.pending_desktop_submissions(), {URL})
+
+    def test_desktop_capture_is_independent_of_a_public_verification_hold(self):
+        self.store.submit_url(URL)
+        with patch("collector.fetch", side_effect=Refused("verification")), self.assertRaises(Refused):
+            self.store.request_article(URL)
+        with patch("desktop.Desktop.filehelper_links", return_value={URL: ("text", URL)}), \
+                patch("desktop.Desktop.capture_received", return_value=(URL, HTML)) as capture, \
+                patch("collector.fetch", return_value=self.image.getvalue()) as fetch, patch("collector.show"):
+            metrics = {}
+            process_desktop_submissions(self.store, {}, UTC, metrics)
+            self.assertEqual(capture.call_args.args[:4], (URL, "text", URL, 120))
+            self.assertEqual([c.args[0] for c in fetch.call_args_list], [ASSET])
+        self.assertEqual(metrics["new_articles"], 1)
+        self.assertFalse(self.store.pending_desktop_submissions())
+
+    def test_viewer_refusal_pauses_that_submission_until_user_requeues_it(self):
+        self.store.submit_url(URL)
+        with patch("desktop.Desktop.filehelper_links", return_value={URL: ("card", "Fixture headline")}), \
+                patch("desktop.Desktop.capture_received", side_effect=Refused("no article body")), patch("builtins.print"):
+            process_desktop_submissions(self.store, {}, UTC, {})
+        self.assertFalse(self.store.pending_desktop_submissions())
+        self.assertFalse(self.store.latest())
+        self.assertEqual(self.store.submit_url(URL), "queued")
+        self.assertEqual(self.store.pending_desktop_submissions(), {URL})
+
+    def test_exact_filehelper_links_and_card_title_lookup(self):
+        card = URL + "Card"
+        msgs = [
+            {"chatId": "other", "type": 1, "content": card},
+            {"chatId": "filehelper", "type": 1, "content": "See " + card},
+            {"chatId": "filehelper", "type": 1, "content": URL + "?from=wechat"},
+            {"chatId": "filehelper", "type": 49, "appMsgType": 5,
+             "rawContent": f"<msg><appmsg><title>Fixture &amp; News</title><url>{card}</url></appmsg></msg>"},
+        ]
+        self.assertEqual(filehelper_articles(msgs), {URL: ("text", URL + "?from=wechat"),
+                                                    card: ("card", "Fixture & News")})
+        node = {"role": "label", "name": "Fixture & News", "bounds": {"x": 20, "y": 20, "width": 80, "height": 30}}
+        rect = (0, 0, 130, 130)
+        self.assertEqual(message_point([node], rect, "card", "Fixture & News"), (60, 35))
+        self.assertIsNone(message_point([node], (30, 0, 130, 130), "card", "Fixture & News"))
+        self.assertIsNone(message_point([node, node | {"bounds": node["bounds"] | {"y": 60}}], rect, "card", "Fixture & News"))
 
     def test_reject_nonwechat_and_active_image_urls(self):
         for raw in ("https://example.org/s/article", "https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha",
