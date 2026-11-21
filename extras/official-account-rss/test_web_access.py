@@ -107,10 +107,13 @@ class WebAccessTests(unittest.TestCase):
                 return held.exception.headers
 
             with make("") as reply:
-                self.assertIn(b'autocomplete="current-password"', reply.read())
+                markup = reply.read()
+                self.assertIn(b'autocomplete="current-password"', markup)
+                self.assertNotIn(b'name="username"', markup)
             rejects("article/1", 404)
-            rejects("login", 403, fields={"username": "owner", "password": "test password"}, origin="https://else.invalid")
-            headers = rejects("login", 303, fields={"username": "owner", "password": "test password"})
+            rejects("login", 403, fields={"password": "test password"}, origin="https://else.invalid")
+            rejects("login", 401, fields={"password": "wrong"})
+            headers = rejects("login", 303, fields={"password": "test password"})
             cookie = headers["Set-Cookie"].split(";")[0]
             self.assertIn("Secure", headers["Set-Cookie"])
             self.assertIn("HttpOnly", headers["Set-Cookie"])

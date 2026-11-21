@@ -780,7 +780,8 @@ def main():
     u = sub.add_parser("url", help="Print a private RSS URL. Do not share its token.")
     u.add_argument("publisher", nargs="?", default="all", help="Publisher ID or all.")
     u.add_argument("--discovered", action="store_true", help="Use the headlines-only discovery feed.")
-    sub.add_parser("dashboard-url", help="Print the private dashboard URL. Do not share its token.")
+    dash = sub.add_parser("dashboard-url", help="Print the browser dashboard URL.")
+    dash.add_argument("--local", action="store_true", help="Use the loopback URL with its private access token.")
     sub.add_parser("stats", help="Show archive coverage and recent run statistics as JSON.")
     sub.add_parser("process-submissions", help="Try at most one submitted URL, obeying the normal public cooldown.")
     a = sub.add_parser("add", help="Fetch a supplied link through ordinary HTTP; hold it if verification is required.")
@@ -817,7 +818,10 @@ def main():
                 raise Refused("Unknown publisher ID.")
             print(f"{origin}/{access}/{'discovered/' if args.discovered else ''}{args.publisher}.xml")
         elif args.command == "dashboard-url":
-            print(f"{origin}/{access}/dashboard")
+            if not args.local and config.get("web"):
+                print(config["web"]["origin"].rstrip("/") + "/wx/oa/")
+            else:
+                print(f"{origin}/{access}/dashboard")
         elif args.command == "stats":
             from dashboard import overview
             print(json.dumps(overview(store, config | {"publishers": store.publisher_map(config)}), ensure_ascii=False, indent=2))

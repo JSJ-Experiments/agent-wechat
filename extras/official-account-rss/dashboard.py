@@ -34,19 +34,63 @@ WITH cards AS (
 )
 """
 CSS = """
-:root{color-scheme:light dark;font-family:system-ui,sans-serif;--line:#8885;--subtle:#8881}
-body{max-width:1050px;margin:28px auto;padding:0 16px;line-height:1.55;overflow-wrap:anywhere}
-a{color:LinkText}h1,h2,h3{line-height:1.2}h1{margin:8px 0}h2{margin:0 0 12px}
-nav{display:flex;gap:12px;align-items:center;flex-wrap:wrap}header,section{margin-bottom:24px}
-.tiles,.publishers{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
-.tile,.publisher,section,.entries li{border:1px solid var(--line);border-radius:10px;padding:12px}
-.tile b{display:block;font-size:1.6rem}.muted,small{color:inherit;opacity:.73}
-progress{display:block;width:100%;height:12px;margin:6px 0 10px;accent-color:#4484ed}
-.entries{list-style:none;padding:0;margin:16px 0}.entries li{margin-bottom:8px}
-.badge{display:inline-block;padding:2px 8px;border-radius:100px;background:var(--subtle);font-size:.86em}
-.filters{display:flex;gap:8px;align-items:center;flex-wrap:wrap}select,button{font:inherit;max-width:100%}
-article{max-width:72ch;margin:0 auto}article img{max-width:100%;height:auto}
-article pre{white-space:pre-wrap}summary{cursor:pointer}dt{font-weight:bold}dd{margin:0 0 10px}
+:root{color-scheme:light dark;font-family:system-ui,sans-serif;--bg:#f3f6f4;--panel:#fff;--text:#18281f;
+--muted:#53655a;--line:#dce7df;--soft:#eaf3ed;--accent:#075f48;--ink:#fff;--warn:#765015;
+--warn-bg:#fff3da;--shadow:0 10px 35px #19362a0b;--radius:18px}
+@media(prefers-color-scheme:dark){:root{--bg:#121b16;--panel:#1b2820;--text:#e7f2ea;--muted:#abbfb1;
+--line:#34473b;--soft:#243a2d;--accent:#83e2b9;--ink:#11271c;--warn:#f2d18b;--warn-bg:#3d321d;
+--shadow:0 10px 35px #0003}}
+*{box-sizing:border-box}body{max-width:1100px;margin:0 auto;padding:0 24px 40px;background:var(--bg);color:var(--text);
+line-height:1.5;overflow-wrap:anywhere}a{color:var(--accent);text-underline-offset:.18em}
+a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+h1,h2,h3,p{margin:0}h1,h2,h3{line-height:1.15}h1{font-size:clamp(2rem,5vw,3.25rem);letter-spacing:-.06em}
+h2{font-size:1.3rem;letter-spacing:-.025em}.muted,small{color:var(--muted)}.eyebrow{color:var(--accent);
+font-size:.71rem;letter-spacing:.14em;font-weight:750;margin-bottom:8px}
+.topbar,.actions,nav,.filters,.section-heading{display:flex;align-items:center;flex-wrap:wrap;gap:10px}
+.topbar{justify-content:space-between;min-height:68px;margin-bottom:15px;border-bottom:1px solid var(--line)}
+.brand{font-weight:780;color:var(--text);display:inline-flex;align-items:center;gap:9px;text-decoration:none}
+.mark{display:inline-grid;place-items:center;width:32px;height:32px;background:var(--accent);color:var(--ink);
+border-radius:10px;font-weight:850;font-size:1.1rem}.hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,.8fr);
+align-items:center;gap:20px;margin-bottom:16px}.hero p{margin-top:9px}.hero-text{padding:9px 0}
+.panel,.quick-add,.tile,.login-card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
+.panel,.quick-add{padding:clamp(15px,3vw,24px);margin-bottom:16px}.quick-add{margin:0}
+.quick-add h2{font-size:1.07rem}.inline-form{display:flex;align-items:flex-end;gap:8px;margin-top:12px}
+.inline-form label{flex:1;min-width:0}.inline-form input{width:100%}.quick-add small{display:block;margin-top:8px}
+input,select,button,.button{font:inherit}input,select{background:var(--bg);color:var(--text);max-width:100%;
+border:1px solid var(--line);border-radius:10px;padding:9px 11px;min-height:41px}
+button,.button{display:inline-flex;gap:.4em;align-items:center;justify-content:center;padding:8px 12px;min-height:40px;
+border-radius:10px;border:1px solid var(--line);background:var(--panel);color:var(--text);cursor:pointer;
+text-align:center;text-decoration:none;font-weight:650;white-space:nowrap}
+button:hover,.button:hover{background:var(--soft)}.primary{background:var(--accent);color:var(--ink);border-color:var(--accent)}
+.primary:hover{background:var(--accent);color:var(--ink);filter:brightness(1.08)}
+.tiles,.publishers{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:16px}
+.tile{padding:12px 15px}.tile b{display:block;font-size:1.65rem;line-height:1.2;letter-spacing:-.05em}.tile span{font-size:.86rem;color:var(--muted)}
+.notice{display:flex;flex-wrap:wrap;gap:6px 14px;background:var(--soft);padding:11px 14px;border-radius:12px;margin-bottom:16px}
+.notice.warn{background:var(--warn-bg);color:var(--warn)}.section-heading{justify-content:space-between;margin-bottom:13px}
+.tabs{display:flex;flex-wrap:wrap;gap:5px;margin:8px 0 12px;border-bottom:1px solid var(--line)}
+.tabs a{display:inline-block;padding:8px 11px;color:var(--muted);text-decoration:none;border-bottom:2px solid transparent}
+.tabs a[aria-current=page]{color:var(--accent);font-weight:750;border-bottom-color:var(--accent)}
+.entries{list-style:none;padding:0;margin:12px 0}.entries li{padding:12px 0;border-bottom:1px solid var(--line)}
+.entries li:last-child{border-bottom:none}.entry-title{font-weight:720;color:var(--text);text-decoration:none}
+.entry-title:hover{text-decoration:underline}.entry-top,.feed-row{display:flex;align-items:start;justify-content:space-between;gap:9px}
+.badge{flex-shrink:0;display:inline-block;padding:2px 8px;border-radius:99px;background:var(--soft);color:var(--muted);font-size:.75rem;font-weight:690}
+.badge.saved{color:var(--accent)}.badge.wait{background:var(--warn-bg);color:var(--warn)}
+.pager{display:flex;flex-wrap:wrap;align-items:center;gap:10px;color:var(--muted);font-size:.9rem}
+.publisher{padding:12px;border:1px solid var(--line);border-radius:12px}.publishers{margin:12px 0 6px}
+progress{display:block;width:100%;height:10px;margin:6px 0 9px;accent-color:var(--accent)}
+summary{cursor:pointer;font-weight:720}.details-list .entries{margin-bottom:0}
+.reader-article{max-width:78ch;margin:0 auto}.reader-article h1{margin-bottom:12px}
+.reader-content{margin-top:22px}.reader-content img{max-width:100%;height:auto;border-radius:9px}
+.reader-content p{margin:.7em 0}.reader-content pre{white-space:pre-wrap}
+.login{padding-bottom:0}.login-wrap{display:grid;min-height:90svh;place-items:center}
+.login-card{width:min(100%,410px);padding:30px}.login-card h1{font-size:2.25rem}.login-card .mark{width:48px;height:48px;
+margin-bottom:20px;font-size:1.55rem}.login-card .muted{margin-top:8px}.login-form{display:grid;gap:9px;margin-top:24px}
+.login-form label{font-size:.9rem;font-weight:700}.login-form button{justify-content:space-between;margin-top:4px}
+[role=alert]{margin-top:12px;color:var(--warn);background:var(--warn-bg);padding:9px;border-radius:8px}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+@media(max-width:640px){body{padding:0 13px 25px}.topbar{min-height:59px}.hero{grid-template-columns:1fr;gap:10px}
+.tiles,.publishers{grid-template-columns:repeat(2,minmax(0,1fr))}.panel,.quick-add{padding:14px}.feed-row{align-items:start;flex-direction:column}}
+@media(max-width:360px){.inline-form{flex-wrap:wrap}.inline-form label{flex:1 0 100%}.entry-top{flex-direction:column}}
 """
 STATUSES = {
     "saved": "Saved body",
@@ -120,10 +164,10 @@ def timestamp(value, *, date_only=False):
     return datetime.fromtimestamp(value, UTC).strftime("%Y-%m-%d" if date_only else "%Y-%m-%d %H:%M UTC")
 
 
-def page(title, body):
+def page(title, body, *, body_class=""):
     return f"""<!doctype html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{escape(title)}</title><style>{CSS}</style><body>{body}</body></html>""".encode()
+<title>{escape(title)}</title><style>{CSS}</style><body class="{escape(body_class)}">{body}</body></html>""".encode()
 
 
 def select_option(value, label, selected):
@@ -156,10 +200,9 @@ def render_dashboard(store, config, params, *, web=False):
             ORDER BY coalesce(published,found) DESC, url LIMIT ? OFFSET ?""", (*args, PAGE_SIZE, (curr-1)*PAGE_SIZE)).fetchall()
 
     t = data["totals"]
-    tiles = "".join(f'<div class="tile"><b>{value}</b>{label}</div>' for label, value in (
-        ("Saved article bodies", t["saved"]), ("Discovered links", t["discovered"]),
-        ("Discovered, not saved", t["discovered"]-t["matched"]), ("Unique cached images", t["cached_images"]),
-        ("Missing image references", t["missing_images"]), ("Needs viewer", t["needs_viewer"])))
+    tiles = "".join(f'<div class="tile"><b>{value}</b><span>{label}</span></div>' for label, value in (
+        ("Saved articles", t["saved"]), ("Discovered links", t["discovered"]),
+        ("Tracked publishers", len(data["publishers"])), ("Cached images", t["cached_images"])))
     bars = "".join(f"""
         <div class="publisher"><strong>{escape(p["publisher"])}</strong>
         <progress value="{p["matched"]}" max="{max(1,p["discovered"])}" aria-label="Discovered links matched to saved articles"></progress>
@@ -169,20 +212,24 @@ def render_dashboard(store, config, params, *, web=False):
         <a href="{escape(p["id"])}.xml">Archive RSS</a>
         · <a href="discovered/{escape(p["id"])}.xml">Headline RSS</a></div>""" for p in data["publishers"])
     cooldown = t["public_fetch_paused_until"]
-    public_status = ("Public requests paused until " + timestamp(cooldown) + ".") if cooldown else "No active pause on public requests."
+    public_status = ("Web capture paused until " + timestamp(cooldown) + ".") if cooldown else "Web capture is available."
     records = []
     for row in entries:
         title, publisher, url = escape(row["title"]), escape(row["publisher"] or "Not identified"), escape(row["url"])
         date = timestamp(row["published"], date_only=True)
         badge = STATUSES.get(row["status"], "Not saved")
         if row["id"] is not None:
-            title = f'<a href="article/{row["id"]}">{title}</a>'
-            detail = f' · {row["image_count"]} cached image files · {row["missing_images"]} missing'
+            title = f'<a class="entry-title" href="article/{row["id"]}">{title}</a>'
+            detail = f' · {row["image_count"]} cached images'
+            if row["missing_images"]:
+                detail += f' · {row["missing_images"]} missing'
         else:
-            title = f'<a href="{url}" rel="noreferrer">{title}</a>'
+            title = f'<a class="entry-title" href="{url}" rel="noreferrer">{title}</a>'
             detail = ""
-        records.append(f'<li><span class="badge">{badge}</span> {title}<br>'
-                       f'<small>{publisher} · Published: {date}{detail}</small></li>')
+        badge_class = {"saved": "saved", "verification-or-layout": "wait", "queued": "wait"}.get(row["status"], "")
+        date_label = f" · {date}" if row["published"] else ""
+        records.append(f'<li><div class="entry-top">{title}<span class="badge {badge_class}">{badge}</span></div>'
+                       f'<small>{publisher}{date_label}{detail}</small></li>')
     runs = []
     for run in data["recent_runs"]:
         metrics = [f"{run['metrics'][key]} {label}" for key, label in METRICS.items() if key in run["metrics"]]
@@ -194,52 +241,58 @@ def render_dashboard(store, config, params, *, web=False):
                     f'· <small>{timestamp(run["finished"])} · {run["duration_ms"]/1000:.1f}s</small>'
                     f'<br>{details} {note}</li>')
     options = "".join(select_option(key, name, slug) for key, name in [("", "All publishers"), *filters.items()])
-    views = "".join(select_option(key, name, view) for key, name in
-                    (("saved", "Saved articles"), ("pending", "Needs capture"), ("all", "All entries")))
+    tabs = []
+    for key, name in (("saved", "Saved articles"), ("pending", "Needs capture"), ("all", "All entries")):
+        href = escape(urlencode({"view": key, "publisher": slug}))
+        current = ' aria-current="page"' if key == view else ""
+        tabs.append(f'<a href="?{href}#inventory"{current}>{name}</a>')
 
     def link(number, label):
         query = escape(urlencode({"view": view, "publisher": slug, "page": number}))
         return f'<a href="?{query}#inventory">{label}</a>'
 
-    nav = " · ".join(part for part in (link(curr-1, "Previous") if curr > 1 else "", f"Page {curr} of {pages}",
-                                       link(curr+1, "Next") if curr < pages else "") if part)
+    nav = " ".join(part for part in (link(curr-1, "← Previous") if curr > 1 else "", f"<span>Page {curr} of {pages}</span>",
+                                      link(curr+1, "Next →") if curr < pages else "") if part)
     alerts = "Configured" if data["alerts_configured"] else "Not configured"
     submission = {"saved": "That URL is already archived.", "queued": "URL added to the capture queue.",
                   "full": "The capture queue is full.", "invalid": "Enter an official WeChat article URL."}.get(selected("submission", ""))
-    controls = f"""<p><a href="feeds">RSS reader URLs</a></p>
-    <form class="filters" method="post" action="submit">
-    <label>Article URL <input type="url" name="url" placeholder="https://mp.weixin.qq.com/s/…" maxlength="8192" required></label>
-    <button type="submit">Queue article</button></form>
-    <p class="muted">Only WeChat official-account article URLs. If WeChat requires verification, open the link in the signed-in viewer.</p>
-    <form method="post" action="logout"><button type="submit">Sign out</button></form>""" if web else ""
-    if web and submission:
-        controls = f'<p role="status"><b>{escape(submission)}</b></p>' + controls
+    banner = f'<div class="notice" role="status">{escape(submission)}</div>' if web and submission else ""
+    controls = """<aside class="quick-add" aria-labelledby="add-heading"><h2 id="add-heading">Add an article</h2>
+    <form class="inline-form" method="post" action="submit">
+    <label><span class="sr">WeChat article URL</span>
+    <input type="url" name="url" placeholder="https://mp.weixin.qq.com/s/…" maxlength="8192" required></label>
+    <button class="primary" type="submit">Queue article</button></form>""" + (
+        f'<small role="status">{escape(submission)}</small>' if submission else
+        '<small>Paste an official-account article link. Protected posts may need the signed-in viewer.</small>'
+    ) + "</aside>" if web else ""
+    header_actions = ('<a class="button" href="feeds">RSS feeds</a><form method="post" action="logout">'
+                      '<button type="submit">Sign out</button></form>') if web else (
+        '<a class="button" href="all.xml">Archive RSS</a><a class="button" href="discovered/all.xml">Headline RSS</a>')
     tracking = (f'{t["active_profile_publishers"]} active official accounts in the synced profile; '
                 'following changes are picked up on the next legacy discovery run.') if config.get("track_follows") else "Using the configured publisher list."
-    publisher_block = f'<div class="publishers">{bars}</div>'
-    if len(data["publishers"]) > 8:
-        publisher_block = f'<details><summary>Coverage by publisher ({len(data["publishers"])})</summary>{publisher_block}</details>'
-    contents = f"""<header><nav><a href="all.xml">Archive RSS</a> <a href="discovered/all.xml">Headline RSS</a> <a href="#inventory">Inventory</a>
-    <a href="#runs">Run history</a></nav><h1>WeChat article archive</h1>
-    <p class="muted">Private archive. Link discovery is not a publisher history crawl.</p>{controls}</header>
-    <main><section><h2>Archive status</h2><div class="tiles">{tiles}</div>
-    <p>{escape(public_status)} {t["queued"]} submitted URLs queued; {t["temporarily_unavailable"]} temporarily unavailable;
-    {t["queued_image_articles"]} saved articles have queued image repairs.</p><p>{tracking}</p>
-    {publisher_block}
-    <p class="muted">Bars compare saved matches with links found in delivered messages only.
-    Full articles captured separately are counted under saved bodies, even when no discovered link matches.
-    Dates cover discovered links with a known date, not the publisher’s entire history.</p></section>
-    <section id="inventory"><h2>Inventory</h2><form class="filters" method="get" action="dashboard">
-    <label>Show <select name="view">{views}</select></label>
-    <label>Publisher <select name="publisher">{options}</select></label><button>Apply</button></form>
-    <p>{count} {'entry' if count == 1 else 'entries'} · {nav}</p>
+    refresh = next((r for r in data["recent_runs"] if r["task"].startswith("discover") and r["outcome"] == "ok"), None)
+    last_synced = f'Last link scan: {timestamp(refresh["finished"])}' if refresh else "No completed link scan recorded"
+    contents = f"""<header class="topbar"><a href="dashboard" class="brand"><span class="mark" aria-hidden="true">W</span>WeChat Archive</a>
+    <nav aria-label="Archive links">{header_actions}</nav></header>
+    <main><section class="hero"><div class="hero-text"><div class="eyebrow">OFFICIAL ACCOUNT READER</div>
+    <h1>Article library</h1><p class="muted">{last_synced}</p></div>{controls}</section>
+    <div class="tiles">{tiles}</div>
+    <div class="notice{' warn' if cooldown else ''}"><strong>{escape(public_status)}</strong>
+    <span>{t["queued"]} queued · {t["needs_viewer"]} need the viewer · {t["missing_images"]} missing image references</span></div>
+    <section id="inventory" class="panel"><div class="section-heading"><div><div class="eyebrow">BROWSE</div><h2>Inventory</h2></div>
+    <form class="filters" method="get" action="dashboard#inventory">
+    <input type="hidden" name="view" value="{view}"><label><span class="sr">Publisher</span>
+    <select name="publisher">{options}</select></label><button>Filter</button></form></div>
+    <nav class="tabs" aria-label="Filter by article status">{"".join(tabs)}</nav>{banner}
+    <div class="pager"><strong>{count} {"entry" if count == 1 else "entries"}</strong>{nav}</div>
     {"<ul class='entries'>"+"".join(records)+"</ul>" if records else "<p>No entries match these filters.</p>"}
-    <p>{nav}</p></section>
-    <section id="runs"><h2>Collector runs</h2>
-    <p>Desktop limit: {data["desktop_pages_per_check"]} visible inbox pages per check. Alerts: {alerts}.</p>
-    <p class="muted">Most recent 20 recorded runs. Page counts are actual inbox views, not article history pages.
-    Runs before tracking was installed are not reconstructed.</p>
-    {"<ul class='entries'>"+"".join(runs)+"</ul>" if runs else "<p>No runs recorded yet.</p>"}</section></main>"""
+    {f'<div class="pager">{nav}</div>' if pages > 1 else ''}</section>
+    <details class="panel details-list"><summary>Coverage by publisher ({len(data["publishers"])})</summary>
+    <p class="muted">{tracking} Counts cover delivered links, not full publisher history.</p>
+    <div class="publishers">{bars}</div></details>
+    <details id="runs" class="panel details-list"><summary>Collector runs</summary>
+    <p class="muted">Most recent 20 runs · {data["desktop_pages_per_check"]} visible desktop pages per check · Alerts: {alerts.lower()}</p>
+    {"<ul class='entries'>"+"".join(runs)+"</ul>" if runs else "<p>No runs recorded yet.</p>"}</details></main>"""
     return page("WeChat article archive", contents)
 
 
@@ -249,8 +302,9 @@ def render_article(store, article_id):
     if article is None:
         return None
     title = escape(article["title"])
-    return page(article["title"], f"""<nav><a href="../dashboard">Back to archive</a>
-        <a href="{escape(article['url'])}" rel="noreferrer">Original in WeChat</a></nav>
-        <article><h1>{title}</h1><p>{escape(article["publisher"])} · Published {timestamp(article["published"])}
-        · {article["image_count"]} cached image files · {article["missing_images"]} missing</p>
-        {archived_markup(article, "../image")}</article>""")
+    return page(article["title"], f"""<header class="topbar"><a class="brand" href="../dashboard">← WeChat Archive</a>
+        <a class="button" href="{escape(article['url'])}" rel="noreferrer">Original in WeChat</a></header>
+        <article class="panel reader-article"><div class="eyebrow">{escape(article["publisher"])}</div>
+        <h1>{title}</h1><p class="muted">Published {timestamp(article["published"])}
+        · {article["image_count"]} cached images · {article["missing_images"]} missing</p>
+        <div class="reader-content">{archived_markup(article, "../image")}</div></article>""")

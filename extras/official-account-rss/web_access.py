@@ -1,4 +1,4 @@
-"""Optional browser login and reader-only RSS access, behind private HTTPS."""
+"""Password-only browser login and reader-only RSS access behind HTTPS."""
 from collections import deque
 from html import escape
 import hashlib
@@ -32,7 +32,7 @@ class WebAccess:
         self.origin = config["origin"].rstrip("/")
         uri = urlsplit(self.origin)
         if uri.scheme != "https" or not uri.hostname or uri.username is not None or uri.path or uri.query or uri.fragment:
-            raise Refused("Browser access requires a fixed private HTTPS origin.")
+            raise Refused("Browser access requires a fixed HTTPS origin.")
         verifier = Path(config["password_hash_file"]).expanduser().read_text().strip()
         if not re.fullmatch(r"[0-9a-f]{32}:[0-9a-f]{128}", verifier):
             raise Refused("Invalid dashboard password verifier.")
@@ -95,12 +95,16 @@ class WebAccess:
 
     def login(self, handler, status=200, notice=""):
         message = f'<p role="alert">{escape(notice)}</p>' if notice else ""
-        body = page("WeChat archive sign in", f"""<main><h1>WeChat article archive</h1>
-        <p>Sign in to browse the private archive.</p>{message}
-        <form method="post" action="{PREFIX}login">
-        <p><label>Username <input name="username" autocomplete="username" value="owner" required></label></p>
-        <p><label>Password <input type="password" name="password" autocomplete="current-password" required autofocus></label></p>
-        <button type="submit">Sign in</button></form></main>""")
+        body = page("Sign in · WeChat Archive", f"""<main class="login-wrap">
+        <section class="login-card"><div class="mark" aria-hidden="true">W</div>
+        <div class="eyebrow">OFFICIAL ACCOUNTS</div><h1>WeChat Archive</h1>
+        <p class="muted">Enter your dashboard password to continue.</p>{message}
+        <form class="login-form" method="post" action="{PREFIX}login">
+        <label for="password">Password</label>
+        <input id="password" type="password" name="password" autocomplete="current-password"
+               placeholder="Dashboard password" maxlength="256" required>
+        <button class="primary" type="submit">Open dashboard <span aria-hidden="true">→</span></button>
+        </form></section></main>""", body_class="login")
         self.respond(handler, status, body, **({"Retry-After": "900"} if status == 429 else {}))
 
     def reader_site(self):
@@ -126,11 +130,12 @@ class WebAccess:
                 self.respond(handler, 400)
                 return None
             if route == "login":
-                result = self.auth(fields.get("password", [""])[0] if fields.get("username") == ["owner"] else "")
+                passwords = fields.get("password", [])
+                result = self.auth(passwords[0] if len(passwords) == 1 else "")
                 if result == 303:
                     self.respond(handler, 303, **{"Location": PREFIX, "Set-Cookie": self.cookie(self.issue(), SESSION_AGE)})
                 else:
-                    self.login(handler, result, "Too many attempts; try again later." if result == 429 else "Invalid username or password.")
+                    self.login(handler, result, "Too many attempts. Try again in 15 minutes." if result == 429 else "Incorrect password.")
             elif not authenticated:
                 self.respond(handler, 403)
             elif route == "logout":
@@ -166,11 +171,14 @@ class WebAccess:
                 self.respond(handler, 404)
             return None
         if route == "feeds":
-            links = "".join(f'<li>{escape(name)}: <a href="{self.reader_site()}/{slug}.xml">Full archive</a>'
-                            f' · <a href="{self.reader_site()}/discovered/{slug}.xml">Discovered headlines</a></li>'
+            links = "".join(f'<li class="feed-row"><strong>{escape(name)}</strong><div class="actions">'
+                            f'<a class="button" href="{self.reader_site()}/{slug}.xml">Full text</a>'
+                            f'<a class="button" href="{self.reader_site()}/discovered/{slug}.xml">Headlines</a></div></li>'
                             for slug, name in [("all", "Combined"), *publishers.items()] if SLUG.fullmatch(slug))
-            body = page("Private RSS reader URLs", f'<p><a href="{PREFIX}">Back to archive</a></p><h1>RSS reader URLs</h1>'
-                        f'<p>Copy these private bearer URLs into your RSS reader. The reader must be on the tailnet. Do not share them.</p><ul>{links}</ul>')
+            body = page("RSS feeds · WeChat Archive", f'<header class="topbar"><a class="brand" href="{PREFIX}">← WeChat Archive</a></header>'
+                        '<main><section class="panel"><div class="eyebrow">SUBSCRIPTIONS</div><h1>RSS feeds</h1>'
+                        '<p class="muted">Copy a feed link into your reader. Headlines include discovered posts; '
+                        f'full text includes only saved articles. Treat these links like passwords.</p><ul class="entries">{links}</ul></section></main>')
             self.respond(handler, 200, body)
             return None
         if route == "login":

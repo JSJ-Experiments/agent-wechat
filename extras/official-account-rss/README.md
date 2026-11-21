@@ -22,22 +22,22 @@ Run `.venv/bin/python collector.py url my-publisher` or `... url all` to get a f
 
 ### Dashboard
 
-Run `.venv/bin/python collector.py dashboard-url` and open the result privately. The local dashboard uses the loopback listener, token, and optional SSH tunnel. There is no public index page. The dashboard can open saved articles, filter and page through the inventory, and show which URLs still need capture. To get the overview as JSON without opening a browser, run `.venv/bin/python collector.py stats`.
+Run `.venv/bin/python collector.py dashboard-url` for the configured browser URL, or add `--local` for the loopback listener with its private token. The dashboard can open saved articles, filter and page through the inventory, and show which URLs still need capture. To get the overview as JSON without opening a browser, run `.venv/bin/python collector.py stats`.
 
 - **Discovered links** are unique URLs seen in delivered cards, not the contents of an account's entire archive. The coverage bars count how many of those URLs match a saved body. Matching uses the exact URL or the same publisher and title within two days, the same as the discovery queue.
 - **Saved bodies** can include articles imported directly that were never found in delivered cards. Image counts describe local image files and missing references separately.
 - **Pages scanned** counts actual inbox views read by the desktop collector, not publisher history pages or dashboard pagination. The run log retains the most recent 100 recorded steps and shows the latest 20. It starts when this update is installed; old console logs are not imported. Dashboard requests never trigger collection.
 
-### Private HTTPS and RSS readers
+### HTTPS and RSS readers
 
-To add an HTML password form at `/wx/oa/`, import [`caddy-private.caddy`](caddy-private.caddy) at the top level of your Caddy configuration and put the loopback-only Caddy listener on a private HTTPS ingress, such as Tailscale Serve. Configure `web.origin` to the exact HTTPS origin (including the port, no path) and `web.password_hash_file` to a private verifier file. Do not publish the dashboard on public password-only ingress. Set the verifier interactively in the collector directory:
+To add an HTML password form at `/wx/oa/`, import [`caddy-route.caddy`](caddy-route.caddy) inside the matching HTTPS site in Caddy. The collector itself remains loopback-only. Configure `web.origin` to the exact HTTPS origin (including any nonstandard port, no path) and `web.password_hash_file` to a private verifier file. Use a strong, unique password for any internet-facing deployment; failed attempts are throttled. Set the verifier interactively in the collector directory:
 
 ```sh
 umask 077
 .venv/bin/python -c 'from getpass import getpass; from pathlib import Path; from secrets import token_bytes; from web_access import password_key; s=token_bytes(16); Path("state/dashboard-password").write_text(s.hex()+":"+password_key(getpass(), s).hex()+"\n")'
 ```
 
-Restart the RSS service after changing the verifier or origin. Sign in as `owner`. The **RSS reader URLs** view includes separate bearer URLs for **full archive** and **discovered headlines**. Feed keys grant access to feeds and cached images, not the dashboard. The headline feed updates even while the article body is unavailable, and does not claim to contain full text. Do not publish or log reader URLs.
+Restart the RSS service after changing the verifier or origin. Sign in with the password alone; there is no username. The **RSS feeds** view includes separate bearer URLs for **full archive** and **discovered headlines**. Feed keys grant access to feeds and cached images, not the dashboard. The headline feed updates even while the article body is unavailable, and does not claim to contain full text. Do not publish or log reader URLs.
 
 The authenticated dashboard can submit official WeChat article URLs. Submissions are deduplicated, given priority over discovered links, and processed by `collector.py process-submissions` (at most one public request per run). You can schedule it separately on a 15-minute timer. Neither submitting a URL nor using the RSS reader contacts WeChat. Public requests still honor the shared cooldown, and a held URL may need to be opened manually in the authorized viewer.
 

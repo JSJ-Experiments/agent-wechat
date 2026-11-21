@@ -1,0 +1,12 @@
+# Import inside the HTTPS site that matches web.origin.
+handle /wx/oa {
+	redir /wx/oa/ 308
+}
+
+handle /wx/oa/* {
+	request_body {
+		max_size 12KB
+	}
+	header >Strict-Transport-Security "max-age=31536000"
+	reverse_proxy 127.0.0.1:16176
+}
