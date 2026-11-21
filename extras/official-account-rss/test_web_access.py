@@ -95,8 +95,12 @@ class WebAccessTests(unittest.TestCase):
 
         client = build_opener(ProxyHandler({}), NoRedirect)
         with self._server() as base:
-            def make(path, *, fields=None, cookie="", origin=ORIGIN):
-                headers = {"Origin": origin, "Cookie": cookie}
+            def make(path, *, fields=None, cookie="", origin=ORIGIN, fetch_site=None):
+                headers = {"Cookie": cookie}
+                if origin is not None:
+                    headers["Origin"] = origin
+                if fetch_site is not None:
+                    headers["Sec-Fetch-Site"] = fetch_site
                 return client.open(Request(base + PREFIX + path, None if fields is None else urlencode(fields).encode(),
                                            headers=headers), timeout=3)
 
@@ -110,15 +114,19 @@ class WebAccessTests(unittest.TestCase):
                 markup = reply.read()
                 self.assertIn(b'autocomplete="current-password"', markup)
                 self.assertNotIn(b'name="username"', markup)
+                self.assertEqual(reply.headers["Referrer-Policy"], "same-origin")
             rejects("article/1", 404)
             rejects("login", 403, fields={"password": "test password"}, origin="https://else.invalid")
+            rejects("login", 403, fields={"password": "test password"}, origin="null", fetch_site="cross-site")
+            rejects("login", 403, fields={"password": "test password"}, origin=None)
             rejects("login", 401, fields={"password": "wrong"})
-            headers = rejects("login", 303, fields={"password": "test password"})
+            headers = rejects("login", 303, fields={"password": "test password"}, origin="null", fetch_site="same-origin")
             cookie = headers["Set-Cookie"].split(";")[0]
             self.assertIn("Secure", headers["Set-Cookie"])
             self.assertIn("HttpOnly", headers["Set-Cookie"])
             with make("", cookie=cookie) as reply:
                 self.assertIn(b"Queue article", reply.read())
+                self.assertEqual(reply.headers["Referrer-Policy"], "same-origin")
             with make(f"reader/{self.auth.reader}/discovered/all.xml") as reply:
                 self.assertEqual(fromstring(reply.read()).tag, "rss")
             rejects(f"reader/{self.auth.reader}/dashboard", 404)

@@ -713,7 +713,7 @@ def serve(config, store, token, origin):
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", f"private, max-age={lifetime}" if lifetime is not None else "no-store")
                 self.send_header("X-Content-Type-Options", "nosniff")
-                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("Referrer-Policy", "same-origin" if web and route == "dashboard" else "no-referrer")
                 if mime.startswith("text/html"):
                     for name, value in HTML_HEADERS.items():
                         self.send_header(name, value)

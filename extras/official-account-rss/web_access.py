@@ -82,7 +82,7 @@ class WebAccess:
     def respond(handler, status, body=b"", **headers):
         handler.send_response(status)
         handler.send_header("Cache-Control", "no-store")
-        handler.send_header("Referrer-Policy", "no-referrer")
+        handler.send_header("Referrer-Policy", headers.pop("Referrer-Policy", "no-referrer"))
         handler.send_header("X-Content-Type-Options", "nosniff")
         if body:
             handler.send_header("Content-Type", "text/html; charset=utf-8")
@@ -105,7 +105,10 @@ class WebAccess:
                placeholder="Dashboard password" maxlength="256" required>
         <button class="primary" type="submit">Open dashboard <span aria-hidden="true">→</span></button>
         </form></section></main>""", body_class="login")
-        self.respond(handler, status, body, **({"Retry-After": "900"} if status == 429 else {}))
+        headers = {"Referrer-Policy": "same-origin"}
+        if status == 429:
+            headers["Retry-After"] = "900"
+        self.respond(handler, status, body, **headers)
 
     def reader_site(self):
         return f"{self.origin}{PREFIX}reader/{self.reader}"
@@ -116,8 +119,16 @@ class WebAccess:
         method = handler.command
         authenticated = self.valid(handler.headers.get("Cookie"))
         if method == "POST":
-            if handler.headers.get("Origin") != self.origin:
-                self.respond(handler, 403)
+            origin = handler.headers.get("Origin")
+            fetch_site = handler.headers.get("Sec-Fetch-Site")
+            # Some browser form navigations omit Origin or serialize it as
+            # null. Only accept that case with a browser same-origin signal.
+            trusted = origin == self.origin or (origin in (None, "null") and fetch_site == "same-origin")
+            if not trusted or fetch_site in ("cross-site", "same-site"):
+                self.respond(handler, 403, page("Request blocked · WeChat Archive",
+                             f'<main class="login-wrap"><section class="login-card"><h1>Request blocked</h1>'
+                             f'<p>Open the dashboard directly and try again.</p><a href="{PREFIX}">Return to dashboard</a>'
+                             '</section></main>'))
                 return None
             length = handler.headers.get("Content-Length", "")
             if not re.fullmatch(r"[0-9]{1,5}", length) or not 0 <= int(length) <= 12000 \

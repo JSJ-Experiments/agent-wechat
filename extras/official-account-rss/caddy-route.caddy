@@ -1,6 +1,6 @@
 # Import inside the HTTPS site that matches web.origin.
 handle /wx/oa {
-	redir /wx/oa/ 308
+	redir * /wx/oa/ 308
 }
 
 handle /wx/oa/* {
