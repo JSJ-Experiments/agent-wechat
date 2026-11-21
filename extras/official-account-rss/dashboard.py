@@ -22,9 +22,15 @@ WITH cards AS (
     SELECT NULL, url, publisher, title, published, found, 0, 0, coalesce(attempt, 'link-only')
     FROM cards WHERE NOT saved
     UNION ALL
+    SELECT NULL, s.url, NULL, 'Submitted article URL', NULL, s.submitted, 0, 0, coalesce(t.state,'queued')
+    FROM submissions s LEFT JOIN attempts t ON t.url=s.url
+    WHERE NOT EXISTS(SELECT 1 FROM discovered_cards d WHERE d.url=s.url)
+    AND NOT EXISTS(SELECT 1 FROM articles a WHERE a.url=s.url)
+    UNION ALL
     SELECT NULL, t.url, NULL, 'Supplied article URL', NULL, t.updated, 0, 0, t.state
     FROM attempts t WHERE NOT EXISTS(SELECT 1 FROM discovered_cards d WHERE d.url=t.url)
     AND NOT EXISTS(SELECT 1 FROM articles a WHERE a.url=t.url)
+    AND NOT EXISTS(SELECT 1 FROM submissions s WHERE s.url=t.url)
 )
 """
 CSS = """
@@ -45,6 +51,7 @@ article pre{white-space:pre-wrap}summary{cursor:pointer}dt{font-weight:bold}dd{m
 STATUSES = {
     "saved": "Saved body",
     "link-only": "Link only",
+    "queued": "Queued",
     "verification-or-layout": "Needs viewer",
     "temporarily-unavailable": "Temporarily unavailable",
 }
@@ -54,6 +61,8 @@ METRICS = {
     "pages_scanned": "desktop pages scanned", "matched_visible_cards": "matching visible cards",
     "article_views_opened": "viewers opened", "resolved_image_references": "image references repaired",
     "delivered": "alerts sent",
+    "followed_publishers": "active official accounts",
+    "ambiguous_names": "ambiguous publisher names",
 }
 
 
@@ -76,12 +85,14 @@ def read_overview(db, config):
                         min(published) AS oldest_discovered,max(published) AS latest_discovered FROM cards""").fetchone())
     totals.update(saved=counts.get("saved", 0), link_only=counts.get("link-only", 0),
                   needs_viewer=counts.get("verification-or-layout", 0),
+                  queued=counts.get("queued", 0),
                   temporarily_unavailable=counts.get("temporarily-unavailable", 0))
     totals.update(db.execute("""SELECT
         (SELECT count(DISTINCT name) FROM assets) AS cached_images,
         (SELECT coalesce(sum(missing_images),0) FROM articles) AS missing_images,
         (SELECT count(*) FROM image_repair) AS queued_image_articles,
-        (SELECT max(updated)+172800 FROM attempts WHERE state='verification-or-layout') AS cooldown_until
+        (SELECT max(updated)+172800 FROM attempts WHERE state='verification-or-layout') AS cooldown_until,
+        (SELECT count(*) FROM followed_publishers) AS active_profile_publishers
     """).fetchone())
     totals["public_fetch_paused_until"] = totals.pop("cooldown_until")
     if (totals["public_fetch_paused_until"] or 0) <= time.time():
@@ -119,7 +130,7 @@ def select_option(value, label, selected):
     return f'<option value="{escape(value)}"{" selected" if value == selected else ""}>{escape(label)}</option>'
 
 
-def render_dashboard(store, config, params):
+def render_dashboard(store, config, params, *, web=False):
     def selected(key, default):
         return params.get(key, [default])[0]
 
@@ -153,10 +164,12 @@ def render_dashboard(store, config, params):
         <div class="publisher"><strong>{escape(p["publisher"])}</strong>
         <progress value="{p["matched"]}" max="{max(1,p["discovered"])}" aria-label="Discovered links matched to saved articles"></progress>
         <small>{p["matched"]} / {p["discovered"]} discovered links matched · {p["saved"]} saved bodies</small><br>
-        <small>{timestamp(p["oldest_discovered"], date_only=True)} to {timestamp(p["latest_discovered"], date_only=True)}</small><br>
-        <a href="{escape(p["id"])}.xml">RSS</a></div>""" for p in data["publishers"])
+        <small>{timestamp(p["oldest_discovered"], date_only=True) + " to " + timestamp(p["latest_discovered"], date_only=True)
+               if p["oldest_discovered"] else "No dated links yet"}</small><br>
+        <a href="{escape(p["id"])}.xml">Archive RSS</a>
+        · <a href="discovered/{escape(p["id"])}.xml">Headline RSS</a></div>""" for p in data["publishers"])
     cooldown = t["public_fetch_paused_until"]
-    web = ("Public requests paused until " + timestamp(cooldown) + ".") if cooldown else "No active pause on public requests."
+    public_status = ("Public requests paused until " + timestamp(cooldown) + ".") if cooldown else "No active pause on public requests."
     records = []
     for row in entries:
         title, publisher, url = escape(row["title"]), escape(row["publisher"] or "Not identified"), escape(row["url"])
@@ -191,12 +204,28 @@ def render_dashboard(store, config, params):
     nav = " · ".join(part for part in (link(curr-1, "Previous") if curr > 1 else "", f"Page {curr} of {pages}",
                                        link(curr+1, "Next") if curr < pages else "") if part)
     alerts = "Configured" if data["alerts_configured"] else "Not configured"
-    contents = f"""<header><nav><a href="all.xml">Combined RSS</a> <a href="#inventory">Inventory</a>
+    submission = {"saved": "That URL is already archived.", "queued": "URL added to the capture queue.",
+                  "full": "The capture queue is full.", "invalid": "Enter an official WeChat article URL."}.get(selected("submission", ""))
+    controls = f"""<p><a href="feeds">RSS reader URLs</a></p>
+    <form class="filters" method="post" action="submit">
+    <label>Article URL <input type="url" name="url" placeholder="https://mp.weixin.qq.com/s/…" maxlength="8192" required></label>
+    <button type="submit">Queue article</button></form>
+    <p class="muted">Only WeChat official-account article URLs. If WeChat requires verification, open the link in the signed-in viewer.</p>
+    <form method="post" action="logout"><button type="submit">Sign out</button></form>""" if web else ""
+    if web and submission:
+        controls = f'<p role="status"><b>{escape(submission)}</b></p>' + controls
+    tracking = (f'{t["active_profile_publishers"]} active official accounts in the synced profile; '
+                'following changes are picked up on the next legacy discovery run.') if config.get("track_follows") else "Using the configured publisher list."
+    publisher_block = f'<div class="publishers">{bars}</div>'
+    if len(data["publishers"]) > 8:
+        publisher_block = f'<details><summary>Coverage by publisher ({len(data["publishers"])})</summary>{publisher_block}</details>'
+    contents = f"""<header><nav><a href="all.xml">Archive RSS</a> <a href="discovered/all.xml">Headline RSS</a> <a href="#inventory">Inventory</a>
     <a href="#runs">Run history</a></nav><h1>WeChat article archive</h1>
-    <p class="muted">Private, read-only view. Link discovery is not a publisher history crawl.</p></header>
+    <p class="muted">Private archive. Link discovery is not a publisher history crawl.</p>{controls}</header>
     <main><section><h2>Archive status</h2><div class="tiles">{tiles}</div>
-    <p>{web} {t["temporarily_unavailable"]} temporarily unavailable; {t["queued_image_articles"]} saved articles have queued image repairs.</p>
-    <div class="publishers">{bars}</div>
+    <p>{escape(public_status)} {t["queued"]} submitted URLs queued; {t["temporarily_unavailable"]} temporarily unavailable;
+    {t["queued_image_articles"]} saved articles have queued image repairs.</p><p>{tracking}</p>
+    {publisher_block}
     <p class="muted">Bars compare saved matches with links found in delivered messages only.
     Full articles captured separately are counted under saved bodies, even when no discovered link matches.
     Dates cover discovered links with a known date, not the publisher’s entire history.</p></section>

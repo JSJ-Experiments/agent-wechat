@@ -10,22 +10,26 @@ from collector import Refused, article_url
 ROOT = Path(__file__).resolve().parent
 
 
-def legacy_cards(config):
+def legacy_snapshot(config):
     name = config.get("desktop", {}).get("container", "agent-wechat")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name):
         raise Refused("Invalid legacy container.")
     names = list(config.get("publishers", {}).values())
-    if not 1 <= len(names) <= 10:
-        raise Refused("Choose between one and ten publishers for a legacy discovery run.")
+    track = bool(config.get("track_follows"))
+    if not (0 if track else 1) <= len(names) <= 10:
+        raise Refused("Choose at most ten manual publishers; specify one if auto-tracking is off.")
     probe = ROOT.joinpath("read_legacy_cards.py").read_text()
     try:
-        result = subprocess.run(["docker", "exec", "-i", name, "python3", "-c", probe],
+        result = subprocess.run(["docker", "exec", "-i", name, "python3", "-c", probe, *(["--followed"] if track else [])],
                                 input=json.dumps(names).encode(), capture_output=True, timeout=45)
     except subprocess.TimeoutExpired:
         raise Refused("Legacy profile query timed out.") from None
     if result.returncode:
         raise Refused("The selected legacy profile or article layout couldn’t be read.")
-    return json.loads(result.stdout)
+    snapshot = json.loads(result.stdout)
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("cards"), list) or not isinstance(snapshot.get("follows"), list):
+        raise Refused("Unexpected legacy discovery result.")
+    return snapshot
 
 
 def native_cards(config):

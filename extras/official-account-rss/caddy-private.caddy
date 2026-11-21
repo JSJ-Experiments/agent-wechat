@@ -1,0 +1,18 @@
+# Import at the top level. Expose this loopback listener via Tailscale Serve
+# or an equivalent private HTTPS ingress, never public password-only ingress.
+http://:16177 {
+	bind 127.0.0.1
+
+	handle /wx/oa {
+		redir /wx/oa/ 308
+	}
+
+	handle /wx/oa/* {
+		header >Strict-Transport-Security "max-age=31536000"
+		reverse_proxy 127.0.0.1:16176
+	}
+
+	handle {
+		respond 404
+	}
+}

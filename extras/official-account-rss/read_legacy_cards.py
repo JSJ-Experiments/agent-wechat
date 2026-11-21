@@ -64,7 +64,8 @@ def articles(payload):
 
 def main():
     wanted = json.load(sys.stdin)
-    if not isinstance(wanted, list) or not 1 <= len(wanted) <= 10 or any(
+    track = "--followed" in sys.argv[1:]
+    if not isinstance(wanted, list) or not (0 if track else 1) <= len(wanted) <= 10 or any(
         not isinstance(n, str) or not 1 <= len(n) <= 120 or any(ord(ch) < 32 for ch in n) for n in wanted
     ):
         raise ValueError("Invalid selected publishers.")
@@ -89,16 +90,27 @@ def main():
 
     contact = profile_db("contact.db")
     biz = profile_db("biz_message_0.db")
-    contacts = contact("SELECT username,nick_name FROM contact WHERE substr(username,1,3)='gh_' AND nick_name IN ("
-                       + ",".join(map(quote, wanted)) + ")")
-    frequency = Counter(r["nick_name"] for r in contacts)
+    # Active official accounts in this supported desktop profile: active
+    # contact row with official-account verification bit, not cached strangers.
+    active = "(local_type=1 AND (flag & 1)<>0 AND delete_flag=0 AND (verify_flag & 8)<>0)"
+    selection = "nick_name IN (" + ",".join(map(quote, wanted)) + ")"
+    contacts = contact(f"""SELECT username,nick_name,{active} AS followed FROM contact
+                            WHERE substr(username,1,3)='gh_' AND ({selection}{" OR " + active if track else ""})
+                            ORDER BY followed DESC, username LIMIT 501""")
+    if len(contacts) > 500:
+        raise RuntimeError("Too many official accounts in the supported desktop profile.")
+    contacts = [r for r in contacts if re.fullmatch(r"gh_[a-z0-9_]{4,100}", r["username"])
+                and isinstance(r["nick_name"], str) and r["nick_name"].strip()]
+    frequencies = Counter(r["nick_name"] for r in contacts)
+    follows = [{"id": "oa-" + hashlib.sha256(r["username"].encode()).hexdigest()[:20],
+                "publisher": r["nick_name"]} for r in contacts if r["followed"]]
     inventory = {row["name"] for row in biz("SELECT name FROM sqlite_master WHERE type='table'")}
     lib = ctypes.CDLL("libzstd.so.1")
     lib.ZSTD_decompress.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t]
     lib.ZSTD_decompress.restype = ctypes.c_size_t
     results = []
     for row in contacts:
-        if frequency[row["nick_name"]] != 1 or not re.fullmatch(r"gh_[a-z0-9_]{4,100}", row["username"]):
+        if frequencies[row["nick_name"]] != 1:
             continue
         table = "Msg_" + hashlib.md5(row["username"].encode(), usedforsecurity=False).hexdigest()
         if table not in inventory:
@@ -113,7 +125,9 @@ def main():
                                     "published": card["create_time"]})
             except (ValueError, UnicodeError):
                 continue
-    print(json.dumps(results, ensure_ascii=False))
+    results.sort(key=lambda row: row["published"] or 0, reverse=True)
+    print(json.dumps({"cards": results[:1500], "follows": follows,
+                      "ambiguous_names": sum(1 for count in frequencies.values() if count > 1)}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

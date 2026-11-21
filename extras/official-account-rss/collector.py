@@ -238,6 +238,12 @@ class Store:
                     duration_ms INTEGER NOT NULL, outcome TEXT NOT NULL, metrics TEXT NOT NULL,
                     note TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS submissions (
+                    url TEXT PRIMARY KEY, submitted INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS followed_publishers (
+                    id TEXT PRIMARY KEY, publisher TEXT NOT NULL
+                );
             """)
 
     def open(self):
@@ -418,17 +424,58 @@ class Store:
                                        (url, publisher, tidy(title)[:600], stamp, int(time.time()))).rowcount
         return inserted
 
-    def candidates(self, limit):
+    def publisher_map(self, config):
+        selected = dict(config.get("publishers", {}))
+        if config.get("track_follows"):
+            with closing(self.open()) as db:
+                names = set(selected.values())
+                for row in db.execute("SELECT id,publisher FROM followed_publishers ORDER BY publisher,id"):
+                    if row["publisher"] not in names and row["id"] not in selected:
+                        selected[row["id"]] = row["publisher"]
+                        names.add(row["publisher"])
+        return selected
+
+    def replace_follows(self, follows):
+        with closing(self.open()) as db, db:
+            db.execute("DELETE FROM followed_publishers")
+            db.executemany("INSERT INTO followed_publishers VALUES (?,?)", ((f["id"], f["publisher"]) for f in follows))
+
+    def submit_url(self, url):
+        url = article_url(url.strip())
+        with closing(self.open()) as db, db:
+            if db.execute("SELECT 1 FROM articles WHERE url=?", (url,)).fetchone():
+                return "saved"
+            if db.execute("SELECT count(*) FROM submissions s WHERE NOT EXISTS(SELECT 1 FROM articles a WHERE a.url=s.url)").fetchone()[0] >= 1000:
+                return "full"
+            db.execute("INSERT OR IGNORE INTO submissions VALUES (?,?)", (url, int(time.time())))
+            return "queued"
+
+    def candidates(self, limit, *, submissions_only=False, publishers=None):
+        allowed = sorted(publishers) if publishers is not None else None
+        if allowed is None:
+            publisher_filter = ""
+        elif allowed:
+            placeholders = ",".join("?" for _ in allowed)
+            publisher_filter = f"AND (d.priority=1 OR d.publisher IN ({placeholders}))"
+        else:
+            publisher_filter = "AND d.priority=1"
         with closing(self.open()) as db:
             if db.execute("SELECT 1 FROM attempts WHERE state='verification-or-layout' AND updated>? LIMIT 1",
                           (int(time.time()) - 48 * 3600,)).fetchone():
                 return []
-            return db.execute(f"""SELECT d.* FROM discovered_cards d WHERE
+            return db.execute(f"""WITH queue AS (
+                SELECT s.url,d.publisher,d.title,d.published,s.submitted AS found,1 AS priority
+                FROM submissions s LEFT JOIN discovered_cards d ON s.url=d.url
+                UNION ALL
+                SELECT d.*,0 AS priority FROM discovered_cards d
+                WHERE NOT EXISTS(SELECT 1 FROM submissions s WHERE s.url=d.url)
+            ) SELECT d.* FROM queue d WHERE (d.priority=1 OR NOT ?) {publisher_filter} AND
                 NOT EXISTS(SELECT 1 FROM attempts t WHERE t.url=d.url AND
                     (t.state='verification-or-layout' OR t.updated>?))
                 AND NOT EXISTS(SELECT 1 FROM articles a WHERE {CARD_MATCH})
-                ORDER BY coalesce(d.published,d.found) DESC, d.url LIMIT ?""",
-                              (int(time.time()) - 6 * 3600, limit)).fetchall()
+                ORDER BY d.priority DESC,CASE WHEN d.priority=1 THEN d.found END,
+                         coalesce(d.published,d.found) DESC, d.url LIMIT ?""",
+                              (submissions_only, *(allowed or []), int(time.time()) - 6 * 3600, limit)).fetchall()
 
     def record_run(self, task, started, outcome, metrics, note):
         with closing(self.open()) as db, db:
@@ -526,7 +573,7 @@ def observe(store, task, metrics):
         outcome, note = "error", "See the collector's service log for details."
         raise
     finally:
-        if task:
+        if task and not (task == "submitted URLs" and outcome == "ok" and not metrics.get("web_requests")):
             try:
                 store.record_run(task, started, outcome, metrics, note)
             except sqlite3.Error:
@@ -559,10 +606,44 @@ def render_rss(store, publisher, site, selector):
     return tostring(rss, encoding="utf-8", xml_declaration=True)
 
 
+def feed_route(route, publishers):
+    selector = route.removeprefix("discovered/")
+    if selector.endswith(".xml") and selector[:-4] in {"all", *publishers}:
+        return selector[:-4], route.startswith("discovered/")
+    return None
+
+
+def render_discovered_rss(store, publisher, site, selector):
+    rss = Element("rss", {"version": "2.0"})
+    channel = SubElement(rss, "channel")
+
+    def sub(parent, key, value):
+        SubElement(parent, key).text = BAD_XML.sub("", str(value))
+
+    sub(channel, "title", f"{publisher or 'WeChat official accounts'} — discovered posts")
+    sub(channel, "link", f"{site}/discovered/{selector}.xml")
+    sub(channel, "description", "Headlines from delivered WeChat cards; this feed never claims to contain full text.")
+    with closing(store.open()) as db:
+        items = db.execute(f"""SELECT d.*, EXISTS(SELECT 1 FROM articles a WHERE {CARD_MATCH}) AS saved
+              FROM discovered_cards d WHERE (? IS NULL OR d.publisher=?)
+              ORDER BY coalesce(d.published,d.found) DESC,d.url LIMIT 50""", (publisher, publisher)).fetchall()
+    for row in items:
+        item = SubElement(channel, "item")
+        sub(item, "title", row["title"])
+        sub(item, "guid", row["url"])
+        sub(item, "link", row["url"])
+        sub(item, "category", row["publisher"])
+        if row["published"]:
+            sub(item, "pubDate", format_datetime(datetime.fromtimestamp(row["published"], UTC), usegmt=True))
+        sub(item, "description", "Full text is in the archive feed." if row["saved"] else "Discovered headline only. Open the original in WeChat.")
+    return tostring(rss, encoding="utf-8", xml_declaration=True)
+
+
 def serve(config, store, token, origin):
     from dashboard import render_article, render_dashboard
+    from web_access import HTML_HEADERS, PREFIX, WebAccess
     site = origin + "/" + token
-    publishers = config.get("publishers", {})
+    gate = WebAccess(config["web"], token) if config.get("web") else None
 
     class Handler(BaseHTTPRequestHandler):
         def setup(self):
@@ -578,20 +659,30 @@ def serve(config, store, token, origin):
         def do_HEAD(self):
             self.reply(include_body=False)
 
+        def do_POST(self):
+            self.reply(include_body=True)
+
         def reply(self, include_body):
             path, _, query = self.path.partition("?")
-            secret, _, route = path.lstrip("/").partition("/")
-            if not re.fullmatch(r"[0-9a-f]{64}", secret) or not hmac.compare_digest(secret, token):
-                self.send_error(404)
-                return
+            web = bool(gate and path.startswith(PREFIX))
             try:
+                publishers = store.publisher_map(config)
+                if web:
+                    route = gate.route(self, path, store, publishers)
+                    if route is None:
+                        return
+                else:
+                    secret, _, route = path.lstrip("/").partition("/")
+                    if self.command == "POST" or not re.fullmatch(r"[0-9a-f]{64}", secret) or not hmac.compare_digest(secret, token):
+                        self.send_error(404)
+                        return
                 if route == "dashboard":
                     try:
                         params = parse_qs(query, max_num_fields=8)
                     except ValueError:
                         self.send_error(400)
                         return
-                    body = render_dashboard(store, config, params)
+                    body = render_dashboard(store, config | {"publishers": publishers}, params, web=web)
                     mime, lifetime = "text/html; charset=utf-8", None
                 elif re.fullmatch(r"article/[1-9][0-9]{0,17}", route):
                     body = render_article(store, int(route.split("/")[1]))
@@ -599,8 +690,11 @@ def serve(config, store, token, origin):
                         self.send_error(404)
                         return
                     mime, lifetime = "text/html; charset=utf-8", None
-                elif route == "all.xml" or route.endswith(".xml") and route[:-4] in publishers:
-                    body = render_rss(store, None if route == "all.xml" else publishers[route[:-4]], site, route[:-4])
+                elif feed := feed_route(route, publishers):
+                    selector, discovery_feed = feed
+                    render = render_discovered_rss if discovery_feed else render_rss
+                    body = render(store, None if selector == "all" else publishers[selector],
+                                  gate.reader_site() if web else site, selector)
                     mime, lifetime = "application/rss+xml; charset=utf-8", 120
                 elif route.startswith("image/") and ASSET_NAME.fullmatch(route[6:]):
                     name = route[6:]
@@ -621,8 +715,8 @@ def serve(config, store, token, origin):
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Referrer-Policy", "no-referrer")
                 if mime.startswith("text/html"):
-                    self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
-                    self.send_header("X-Robots-Tag", "noindex, nofollow")
+                    for name, value in HTML_HEADERS.items():
+                        self.send_header(name, value)
                 self.end_headers()
                 if include_body:
                     self.wfile.write(body)
@@ -638,6 +732,23 @@ def show(result):
     row, new = result
     print(json.dumps({k: row[k] for k in ("publisher", "title", "url", "image_count", "missing_images")}
                      | {"new": new}, ensure_ascii=False))
+
+
+def process_candidates(store, limit, zone, metrics, *, submissions_only=False, publishers=None):
+    metrics.update(web_requests=0, held_this_run=0, new_articles=0)
+    if not limit:
+        return
+    for index, row in enumerate(store.candidates(limit, submissions_only=submissions_only, publishers=publishers)):
+        if index:
+            time.sleep(2)
+        try:
+            metrics["web_requests"] += 1
+            result = store.request_article(row["url"], row["publisher"], zone)
+            metrics["new_articles"] += int(result[1])
+            show(result)
+        except Refused:
+            metrics["held_this_run"] += 1
+            break  # One refusal ends public requests in this run.
 
 
 def native_links(payload):
@@ -668,8 +779,10 @@ def main():
     sub.add_parser("serve", help="Serve private feeds and cached images on loopback.")
     u = sub.add_parser("url", help="Print a private RSS URL. Do not share its token.")
     u.add_argument("publisher", nargs="?", default="all", help="Publisher ID or all.")
+    u.add_argument("--discovered", action="store_true", help="Use the headlines-only discovery feed.")
     sub.add_parser("dashboard-url", help="Print the private dashboard URL. Do not share its token.")
     sub.add_parser("stats", help="Show archive coverage and recent run statistics as JSON.")
+    sub.add_parser("process-submissions", help="Try at most one submitted URL, obeying the normal public cooldown.")
     a = sub.add_parser("add", help="Fetch a supplied link through ordinary HTTP; hold it if verification is required.")
     a.add_argument("url")
     a.add_argument("--retry", action="store_true", help="Manually retry a held URL.")
@@ -700,14 +813,14 @@ def main():
         if args.command == "serve":
             serve(config, store, access, origin)
         elif args.command == "url":
-            if args.publisher != "all" and args.publisher not in config.get("publishers", {}):
+            if args.publisher != "all" and args.publisher not in store.publisher_map(config):
                 raise Refused("Unknown publisher ID.")
-            print(f"{origin}/{access}/{args.publisher}.xml")
+            print(f"{origin}/{access}/{'discovered/' if args.discovered else ''}{args.publisher}.xml")
         elif args.command == "dashboard-url":
             print(f"{origin}/{access}/dashboard")
         elif args.command == "stats":
             from dashboard import overview
-            print(json.dumps(overview(store, config), ensure_ascii=False, indent=2))
+            print(json.dumps(overview(store, config | {"publishers": store.publisher_map(config)}), ensure_ascii=False, indent=2))
         elif args.command == "status":
             with closing(store.open()) as db:
                 for row in db.execute("SELECT publisher,count(*) AS articles,sum(image_count) AS images,sum(missing_images) AS missing FROM articles GROUP BY publisher"):
@@ -717,7 +830,8 @@ def main():
                                   "articles_with_queued_images": db.execute("SELECT count(*) FROM image_repair").fetchone()[0]}))
         else:
             task = {"discover": f"discover ({getattr(args, 'source', '')})", "check": "desktop check",
-                    "notify": "alerts", "repair-images": "image repair", "capture-open": "desktop capture"}.get(args.command)
+                    "notify": "alerts", "repair-images": "image repair", "capture-open": "desktop capture",
+                    "process-submissions": "submitted URLs"}.get(args.command)
             metrics = {}
             with run_lock(store), observe(store, task, metrics):
                 if args.command == "add":
@@ -744,27 +858,28 @@ def main():
                 elif args.command == "repair-images":
                     metrics["resolved_image_references"] = store.repair_images(args.limit)
                     print(json.dumps(metrics))
+                elif args.command == "process-submissions":
+                    process_candidates(store, 1, zone, metrics, submissions_only=True)
+                    print(json.dumps(metrics))
                 elif args.command == "discover":
-                    from discovery import legacy_cards, native_cards
-                    cards = (native_cards if args.source == "native" else legacy_cards)(config)
-                    added = store.discover(cards, set(config.get("publishers", {}).values()))
-                    metrics.update(discovered=added, links_read=len(cards), web_requests=0, held_this_run=0, new_articles=0)
-                    for index, row in enumerate(store.candidates(args.fetch)):
-                        if index:
-                            time.sleep(2)
-                        try:
-                            metrics["web_requests"] += 1
-                            result = store.request_article(row["url"], row["publisher"], zone)
-                            metrics["new_articles"] += int(result[1])
-                            show(result)
-                        except Refused:
-                            metrics["held_this_run"] += 1
-                            # Don't try more public article requests this run after a refusal.
-                            break
+                    from discovery import legacy_snapshot, native_cards
+                    if args.source == "legacy":
+                        snapshot = legacy_snapshot(config)
+                        cards = snapshot["cards"]
+                        if config.get("track_follows"):
+                            store.replace_follows(snapshot["follows"])
+                            metrics.update(followed_publishers=len(snapshot["follows"]),
+                                           ambiguous_names=snapshot["ambiguous_names"])
+                    else:
+                        cards = native_cards(config)
+                    publishers = set(store.publisher_map(config).values())
+                    added = store.discover(cards, publishers)
+                    metrics.update(discovered=added, links_read=len(cards))
+                    process_candidates(store, args.fetch, zone, metrics, publishers=publishers)
                     print(json.dumps(metrics | {"cards_read": metrics["links_read"]}))
                 else:
                     from desktop import Desktop
-                    desktop = Desktop(config)
+                    desktop = Desktop(config | {"publishers": store.publisher_map(config)})
                     if args.command == "capture-open":
                         url, clipboard = desktop.capture()
                         result = store.ingest(url, clipboard, args.publisher, zone)

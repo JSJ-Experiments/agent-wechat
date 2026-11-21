@@ -3,6 +3,7 @@
   "article_timezone": "UTC",
   "port": 16176,
   "base_url": "http://127.0.0.1:16176",
+  "track_follows": false,
   "visible_pages": 1,
   "articles_per_check": 1,
   "desktop": {
